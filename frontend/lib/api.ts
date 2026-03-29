@@ -98,3 +98,172 @@ export async function checkHealth(): Promise<{ status: string; cuda_available: b
   if (!res.ok) throw new Error('Backend not available');
   return res.json();
 }
+
+// Security Insights API
+
+export interface SecurityInsight {
+  insight_id: string;
+  category: string;
+  title: string;
+  description: string;
+  severity: string;
+  confidence: number;
+  event_count: number;
+  sample_events: Record<string, unknown>[];
+  affected_subsystems: string[];
+  source_ips: string[];
+  target_assets: string[];
+  mitre_tactics: string[];
+  mitre_techniques: string[];
+  immediate_actions: string[];
+  long_term_actions: string[];
+  ioc_indicators: Record<string, unknown>[];
+}
+
+export interface Correlation {
+  cluster_a: number;
+  cluster_b: number;
+  correlation_type: string;
+  correlation_strength: number;
+  shared_indicators: string[];
+  description: string;
+}
+
+export interface InsightsResponse {
+  job_id: string;
+  total_events: number;
+  total_clusters: number;
+  insights: SecurityInsight[];
+  correlations: Correlation[];
+  executive_summary: {
+    overview: Record<string, number>;
+    severity_distribution: Record<string, number>;
+    category_distribution: Record<string, number>;
+    critical_findings: Record<string, unknown>[];
+    high_priority_findings: Record<string, unknown>[];
+    mitre_coverage: {
+      tactics: string[];
+      techniques: string[];
+    };
+    top_threat_actors: string[];
+    recommended_priorities: string[];
+  };
+  threat_landscape: {
+    attack_types_detected: Record<string, number>;
+    severity_distribution: Record<string, number>;
+    subsystem_impact: Record<string, { event_count: number; insight_count: number }>;
+    top_threat_sources: { ip: string; insights: string[]; total_events: number }[];
+    most_targeted_assets: { ip: string; insights: string[]; total_events: number }[];
+    cluster_risk_scores: Record<string, { score: number; level: string; factors: string[]; event_count: number }>;
+  };
+}
+
+export interface IOCsResponse {
+  job_id: string;
+  generated_at: string;
+  malicious_ips: {
+    ip: string;
+    contexts: string[];
+    event_count: number;
+    severity: string;
+    recommendation: string;
+  }[];
+  attack_patterns: {
+    pattern: string;
+    description: string;
+    mitre_techniques: string[];
+    source_ips: string[];
+    severity: string;
+  }[];
+  suspicious_users: {
+    user: string;
+    reasons: string[];
+    event_count: number;
+  }[];
+  firewall_rules: {
+    rule_type: string;
+    priority: number;
+    description: string;
+    ips?: string[];
+    ports?: number[];
+    direction?: string;
+    action?: string;
+    max_connections_per_minute?: number;
+  }[];
+  total_unique_threat_ips: number;
+  total_attack_patterns: number;
+}
+
+export interface MITREResponse {
+  job_id: string;
+  tactics_coverage: Record<string, {
+    techniques: string[];
+    insights: string[];
+    event_count: number;
+  }>;
+  techniques_detected: Record<string, {
+    insights: string[];
+    clusters: number[];
+    event_count: number;
+  }>;
+  total_tactics: number;
+  total_techniques: number;
+  kill_chain_analysis: {
+    stages_detected: string[];
+    attack_progression: number;
+    assessment: string;
+  };
+  coverage_assessment: {
+    high_impact_tactics_detected: string[];
+    high_impact_coverage: number;
+    overall_risk: string;
+  };
+  mitigation_priorities: {
+    technique: string;
+    event_count: number;
+    recommended_mitigations: string[];
+  }[];
+}
+
+export async function getSecurityInsights(jobId: string): Promise<InsightsResponse> {
+  const res = await fetch(`${API_BASE}/insights/${jobId}`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Failed to get security insights');
+  }
+  return res.json();
+}
+
+export async function getClusterInsights(jobId: string, clusterId: number): Promise<{
+  cluster_id: number;
+  event_count: number;
+  profile: Record<string, unknown> | null;
+  insights: SecurityInsight[];
+  risk_assessment: { score: number; level: string; factors: string[]; event_count: number };
+  sample_events: Record<string, unknown>[];
+}> {
+  const res = await fetch(`${API_BASE}/insights/${jobId}/cluster/${clusterId}`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Failed to get cluster insights');
+  }
+  return res.json();
+}
+
+export async function getIOCs(jobId: string): Promise<IOCsResponse> {
+  const res = await fetch(`${API_BASE}/insights/${jobId}/iocs`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Failed to get IOCs');
+  }
+  return res.json();
+}
+
+export async function getMITREMapping(jobId: string): Promise<MITREResponse> {
+  const res = await fetch(`${API_BASE}/insights/${jobId}/mitre`);
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Failed to get MITRE mapping');
+  }
+  return res.json();
+}
