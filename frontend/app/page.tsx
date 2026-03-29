@@ -19,15 +19,18 @@ import { TrainingConfig } from '@/components/training-config'
 import { TrainingProgress } from '@/components/training-progress'
 import { ClusterVisualization } from '@/components/cluster-visualization'
 import { ClusterDetails } from '@/components/cluster-details'
+import { SecurityInsights } from '@/components/security-insights'
 import {
   startTraining,
   getTrainingStatus,
   getResults,
   getDemoEvents,
   checkHealth,
+  getSecurityInsights,
   type TrainingRequest,
   type TrainingProgress as TrainingProgressType,
   type AnalysisResponse,
+  type InsightsResponse,
 } from '@/lib/api'
 
 type AppState = 'idle' | 'configuring' | 'training' | 'completed' | 'error'
@@ -40,6 +43,8 @@ export default function SecurityClusteringApp() {
   const [jobId, setJobId] = useState<string | null>(null)
   const [progress, setProgress] = useState<TrainingProgressType | null>(null)
   const [results, setResults] = useState<AnalysisResponse | null>(null)
+  const [insights, setInsights] = useState<InsightsResponse | null>(null)
+  const [insightsLoading, setInsightsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Check backend health on mount
@@ -73,6 +78,17 @@ export default function SecurityClusteringApp() {
           const res = await getResults(jobId)
           setResults(res)
           setState('completed')
+          
+          // Load security insights after completion
+          setInsightsLoading(true)
+          try {
+            const insightsData = await getSecurityInsights(jobId)
+            setInsights(insightsData)
+          } catch (err) {
+            console.error('Failed to load insights:', err)
+          } finally {
+            setInsightsLoading(false)
+          }
         } else if (status.status === 'failed') {
           setError(status.message)
           setState('error')
@@ -105,6 +121,8 @@ export default function SecurityClusteringApp() {
     setJobId(null)
     setProgress(null)
     setResults(null)
+    setInsights(null)
+    setInsightsLoading(false)
     setError(null)
   }
 
@@ -311,12 +329,17 @@ export default function SecurityClusteringApp() {
             </div>
 
             {/* Main Results */}
-            <Tabs defaultValue="visualization" className="space-y-4">
-              <TabsList>
+            <Tabs defaultValue="insights" className="space-y-4">
+              <TabsList className="grid w-full grid-cols-4">
+                <TabsTrigger value="insights">Security Insights</TabsTrigger>
                 <TabsTrigger value="visualization">Visualization</TabsTrigger>
                 <TabsTrigger value="clusters">Cluster Details</TabsTrigger>
                 <TabsTrigger value="threats">Threat Analysis</TabsTrigger>
               </TabsList>
+
+              <TabsContent value="insights">
+                <SecurityInsights data={insights} loading={insightsLoading} />
+              </TabsContent>
 
               <TabsContent value="visualization">
                 <ClusterVisualization data={results} />
