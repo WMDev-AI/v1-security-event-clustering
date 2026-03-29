@@ -4,6 +4,8 @@ FastAPI backend for processing and clustering security events
 """
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
+
 from pydantic import BaseModel, Field
 from typing import Optional
 import numpy as np
@@ -12,6 +14,8 @@ from enum import Enum
 import uuid
 import asyncio
 from datetime import datetime
+from collections import Counter, defaultdict
+
 
 from event_parser import EventParser, SecurityEvent
 from deep_clustering import (
@@ -38,6 +42,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# wrapper app
+root_app = FastAPI()
+
+# mount original app under /api
+root_app.mount("/api", app)
 
 # Global state for training jobs
 training_jobs = {}
@@ -313,7 +323,11 @@ async def get_training_status(job_id: str):
     if job_id not in training_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    return training_jobs[job_id]
+    # return training_jobs[job_id]
+    return jsonable_encoder(
+        training_jobs[job_id],
+        custom_encoder={np.generic: lambda x: x.item()}
+    )
 
 
 @app.get("/results/{job_id}")
@@ -1144,4 +1158,4 @@ def _generate_mitre_mitigations(techniques: dict) -> list[dict]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(root_app, host="0.0.0.0", port=8000)
