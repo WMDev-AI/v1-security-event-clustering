@@ -1,0 +1,13 @@
+[project]
+name = "security-deep-clustering"
+version = "0.1.0"
+description = "Deep Clustering System for Security Event Analysis"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.128.1",
+    "torch>=2.2.0",
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.0.0",
+]
