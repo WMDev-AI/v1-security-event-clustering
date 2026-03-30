@@ -115,6 +115,18 @@ class ClusterAnalyzer:
         hours = Counter()
         content_words = Counter()
         
+        # Subsystem-specific collectors
+        urls = Counter()
+        response_codes = Counter()
+        rule_names = Counter()
+        malwares = Counter()
+        vpn_users = Counter()
+        senders = Counter()
+        recipients = Counter()
+        attack_vectors = Counter()
+        dns_queries = Counter()
+        policies = Counter()
+        
         weekend_count = 0
         business_hours_count = 0
         has_user_count = 0
@@ -140,6 +152,28 @@ class ClusterAnalyzer:
             if event.user:
                 users[event.user] += 1
                 has_user_count += 1
+            
+            # Subsystem-specific field collection
+            if event.url:
+                urls[event.url] += 1
+            if event.response_code > 0:
+                response_codes[event.response_code] += 1
+            if event.rule_name:
+                rule_names[event.rule_name] += 1
+            if event.malware_name:
+                malwares[event.malware_name] += 1
+            if event.vpn_user:
+                vpn_users[event.vpn_user] += 1
+            if event.sender:
+                senders[event.sender] += 1
+            if event.recipient:
+                recipients[event.recipient] += 1
+            if event.attack_vector:
+                attack_vectors[event.attack_vector] += 1
+            if event.dns_query:
+                dns_queries[event.dns_query] += 1
+            if event.firewall_policy:
+                policies[event.firewall_policy] += 1
             
             # Temporal analysis
             if event.timestamp:
@@ -210,7 +244,7 @@ class ClusterAnalyzer:
         profile: ClusterProfile,
         events: list[SecurityEvent]
     ) -> tuple[str, list[str]]:
-        """Assess threat level based on cluster characteristics"""
+        """Assess threat level based on cluster characteristics and subsystem-specific fields"""
         indicators = []
         threat_score = 0
         
@@ -249,6 +283,10 @@ class ClusterAnalyzer:
             indicators.append("Security detection system alerts")
             threat_score += 2
         
+        # Subsystem-specific threat assessment
+        threat_score, subsys_indicators = self._assess_subsystem_threats(events)
+        indicators.extend(subsys_indicators)
+        
         # Check for off-hours activity (potential APT)
         if profile.weekend_ratio > 0.5:
             indicators.append("Predominantly weekend activity")
@@ -277,6 +315,78 @@ class ClusterAnalyzer:
             threat_level = "info"
         
         return threat_level, indicators
+    
+    def _assess_subsystem_threats(self, events: list[SecurityEvent]) -> tuple[int, list[str]]:
+        """Assess threats based on subsystem-specific fields"""
+        threat_score = 0
+        indicators = []
+        
+        for event in events:
+            # WAF/Web Filter threats
+            if event.subsystem in ['waf', 'webfilter']:
+                if event.response_code >= 400:
+                    threat_score += 1
+                if '403' in str(event.response_code) or '503' in str(event.response_code):
+                    threat_score += 2
+                if event.url and any(x in event.url.lower() for x in ['admin', 'login', '.php', '.asp', '.jsp']):
+                    indicators.append(f"Web attack targeting sensitive path: {event.url[:50]}")
+                    threat_score += 3
+                if event.attack_type and 'sql' in event.attack_type.lower():
+                    indicators.append(f"SQL Injection attempt detected")
+                    threat_score += 4
+            
+            # IPS/IDS threats
+            elif event.subsystem == 'ips':
+                if event.rule_name and any(x in event.rule_name.lower() for x in ['exploit', 'shellcode', 'backdoor']):
+                    indicators.append(f"Exploit/malware signature detected: {event.rule_name}")
+                    threat_score += 5
+                if event.attack_type and 'reconnaissance' in event.attack_type.lower():
+                    threat_score += 2
+            
+            # VPN threats
+            elif event.subsystem == 'vpn':
+                # Check for multiple VPN users accessing unusual hours
+                if event.vpn_user and event.timestamp:
+                    threat_score += 1
+                if event.vpn_bytes_in > 1e9 or event.vpn_bytes_out > 1e9:
+                    indicators.append(f"Unusual VPN data volume detected: {max(event.vpn_bytes_in, event.vpn_bytes_out) / 1e9:.1f}GB")
+                    threat_score += 2
+            
+            # Mail/DLP threats
+            elif event.subsystem in ['mail', 'dlp']:
+                if event.attachment_count > 5:
+                    indicators.append(f"High number of attachments: {event.attachment_count}")
+                    threat_score += 2
+                if event.dlp_category and any(x in event.dlp_category.lower() for x in ['confidential', 'restricted', 'pii', 'credit']):
+                    indicators.append(f"Sensitive data category detected: {event.dlp_category}")
+                    threat_score += 4
+            
+            # Sandbox/AV threats
+            elif event.subsystem in ['sandbox', 'antivirus']:
+                if event.malware_name:
+                    indicators.append(f"Malware detected: {event.malware_name}")
+                    threat_score += 5
+                if event.sandbox_verdict and 'malicious' in event.sandbox_verdict.lower():
+                    threat_score += 4
+            
+            # DDoS threats
+            elif event.subsystem == 'ddos':
+                if event.attack_vector:
+                    indicators.append(f"DDoS attack: {event.attack_vector}")
+                    threat_score += 4
+                if event.bandwidth_consumed > 1e9:  # > 1GB/s
+                    indicators.append(f"High bandwidth DDoS: {event.bandwidth_consumed / 1e9:.1f}GB/s")
+                    threat_score += 3
+                if event.packets_dropped > 100000:
+                    threat_score += 2
+            
+            # DNS threats
+            elif event.subsystem == 'dns':
+                if event.dns_query and any(x in event.dns_query.lower() for x in ['.tk', '.ml', '.ga', 'ddns', 'dyn']):
+                    indicators.append(f"Suspect DNS query: {event.dns_query}")
+                    threat_score += 3
+        
+        return threat_score, indicators[:5]  # Return top 5 indicators
     
     def _generate_recommendations(self, profile: ClusterProfile) -> list[str]:
         """Generate security recommendations based on cluster profile"""
