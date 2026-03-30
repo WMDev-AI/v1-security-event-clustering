@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Shield,
   AlertTriangle,
@@ -44,29 +44,74 @@ function ThreatBadge({ level }: { level: string }) {
 
 function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
-  const [clusterEvents, setClusterEvents] = useState<SecurityEvent[] | null>(null)
-  const [isLoadingAllEvents, setIsLoadingAllEvents] = useState(false)
-  const [showAllEvents, setShowAllEvents] = useState(false)
+  const [displayedEvents, setDisplayedEvents] = useState<SecurityEvent[]>([])
+  const [totalEvents, setTotalEvents] = useState(0)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [totalPages, setTotalPages] = useState(0)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+  const [hasLoadedInitial, setHasLoadedInitial] = useState(false)
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const loaderRef = useRef<HTMLDivElement>(null)
+  const PAGE_SIZE = 30
 
-  // Fetch all events in background when cluster expands
+  // Load initial events on expansion
   useEffect(() => {
-    if (isExpanded && jobId && !clusterEvents) {
-      setIsLoadingAllEvents(true)
-      getClusterEvents(jobId, cluster.cluster_id)
-        .then(data => setClusterEvents(data.events))
-        .catch(error => {
-          console.error('Failed to load cluster events:', error)
-          // Still keep representative events available
-          setClusterEvents([])
-        })
-        .finally(() => setIsLoadingAllEvents(false))
+    if (isExpanded && jobId && !hasLoadedInitial) {
+      setHasLoadedInitial(true)
+      loadPage(1)
     }
-  }, [isExpanded, jobId, cluster.cluster_id, clusterEvents])
+  }, [isExpanded, jobId, hasLoadedInitial])
 
-  // Show representative events immediately, full events when loaded
-  const displayedEvents = clusterEvents 
-    ? (showAllEvents ? clusterEvents : clusterEvents.slice(0, 3))
-    : cluster.representative_events.slice(0, 3)
+  // Load a specific page
+  const loadPage = useCallback(async (pageNum: number) => {
+    if (!jobId) return
+    
+    try {
+      setIsLoadingMore(true)
+      const response = await getClusterEvents(jobId, cluster.cluster_id, pageNum, PAGE_SIZE)
+      
+      if (pageNum === 1) {
+        // First page - replace with representative events then loaded events
+        setDisplayedEvents(response.events)
+      } else {
+        // Subsequent pages - append to existing
+        setDisplayedEvents(prev => [...prev, ...response.events])
+      }
+      
+      setTotalEvents(response.total_events)
+      setTotalPages(response.total_pages)
+      setCurrentPage(pageNum)
+    } catch (error) {
+      console.error('Failed to load cluster events:', error)
+      // On error, fall back to representative events for first page
+      if (pageNum === 1) {
+        setDisplayedEvents(cluster.representative_events)
+      }
+    } finally {
+      setIsLoadingMore(false)
+    }
+  }, [jobId, cluster.cluster_id, cluster.representative_events])
+
+  // Load more on scroll
+  useEffect(() => {
+    if (!scrollAreaRef.current || !isExpanded || isLoadingMore) return
+
+    const scrollElement = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+    if (!scrollElement) return
+
+    const handleScroll = () => {
+      // Check if user scrolled near bottom (within 200px)
+      const isNearBottom = 
+        scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 200
+
+      if (isNearBottom && currentPage < totalPages && !isLoadingMore) {
+        loadPage(currentPage + 1)
+      }
+    }
+
+    scrollElement.addEventListener('scroll', handleScroll)
+    return () => scrollElement.removeEventListener('scroll', handleScroll)
+  }, [currentPage, totalPages, isLoadingMore, isExpanded, loadPage])
 
   return (
     <Card className={cn(
@@ -194,109 +239,116 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             </div>
           )}
 
-          {/* Events Table */}
+          {/* Events Table with Lazy Loading */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-sm font-medium flex items-center gap-1.5">
                 <Clock className="h-4 w-4" />
-                Cluster Events {clusterEvents && `(${clusterEvents.length})`}
+                Cluster Events {totalEvents > 0 && `(${displayedEvents.length}/${totalEvents})`}
               </h4>
-              <div className="flex items-center gap-2">
-                {isLoadingAllEvents && (
-                  <span className="text-xs text-muted-foreground flex items-center gap-1">
-                    <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                    Loading all events...
-                  </span>
-                )}
-                {clusterEvents && clusterEvents.length > 3 && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs"
-                    onClick={() => setShowAllEvents(!showAllEvents)}
-                  >
-                    {showAllEvents ? 'Show Less' : `Show All (${clusterEvents.length})`}
-                  </Button>
-                )}
-              </div>
+              {isLoadingMore && (
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                  Loading...
+                </span>
+              )}
             </div>
 
             <div className="border rounded-lg overflow-hidden">
-              <ScrollArea className={cn(
-                "w-full",
-                showAllEvents && clusterEvents && clusterEvents.length > 3 ? "h-[500px]" : "h-[300px]"
-              )}>
-                <Table className="text-xs">
-                  <TableHeader className="sticky top-0 bg-muted/80">
-                    <TableRow>
-                      <TableHead className="w-12">#</TableHead>
-                      <TableHead className="w-24">Timestamp</TableHead>
-                      <TableHead className="w-20">Source IP</TableHead>
-                      <TableHead className="w-20">Dest IP</TableHead>
-                      <TableHead className="w-12">Port</TableHead>
-                      <TableHead className="w-16">Subsystem</TableHead>
-                      <TableHead className="w-16">Action</TableHead>
-                      <TableHead className="w-12">Severity</TableHead>
-                      <TableHead>Content</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {displayedEvents.map((event: SecurityEvent, i: number) => (
-                      <TableRow key={i} className="hover:bg-muted/50">
-                        <TableCell className="font-mono text-xs">{i + 1}</TableCell>
-                        <TableCell className="font-mono text-xs truncate">
-                          {event.timestamp ? new Date(event.timestamp).toLocaleString('en-US', {
-                            month: '2-digit',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            second: '2-digit',
-                            hour12: false
-                          }) : '-'}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs truncate" title={event.source_ip}>
-                          {event.source_ip || '-'}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs truncate" title={event.dest_ip}>
-                          {event.dest_ip || '-'}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">
-                          {event.dest_port || '-'}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {event.subsystem && (
-                            <Badge variant="outline" className="text-xs px-1 py-0">
-                              {event.subsystem}
-                            </Badge>
-                          )}
-                          {!event.subsystem && '-'}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {event.action && (
-                            <Badge variant="secondary" className="text-xs px-1 py-0">
-                              {event.action}
-                            </Badge>
-                          )}
-                          {!event.action && '-'}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {event.severity && (
-                            <Badge 
-                              variant={event.severity.toLowerCase() as 'critical' | 'high' | 'medium' | 'low' | 'info'} 
-                              className="text-xs px-1 py-0"
-                            >
-                              {event.severity}
-                            </Badge>
-                          )}
-                          {!event.severity && '-'}
-                        </TableCell>
-                        <TableCell className="text-xs truncate max-w-xs" title={event.content}>
-                          {event.content || '-'}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+              <ScrollArea ref={scrollAreaRef} className="w-full h-[500px]">
+                {displayedEvents.length > 0 ? (
+                  <>
+                    <Table className="text-xs">
+                      <TableHeader className="sticky top-0 bg-muted/80 z-10">
+                        <TableRow>
+                          <TableHead className="w-12">#</TableHead>
+                          <TableHead className="w-24">Timestamp</TableHead>
+                          <TableHead className="w-20">Source IP</TableHead>
+                          <TableHead className="w-20">Dest IP</TableHead>
+                          <TableHead className="w-12">Port</TableHead>
+                          <TableHead className="w-16">Subsystem</TableHead>
+                          <TableHead className="w-16">Action</TableHead>
+                          <TableHead className="w-12">Severity</TableHead>
+                          <TableHead>Content</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {displayedEvents.map((event: SecurityEvent, i: number) => (
+                          <TableRow key={i} className="hover:bg-muted/50">
+                            <TableCell className="font-mono text-xs">{i + 1}</TableCell>
+                            <TableCell className="font-mono text-xs truncate">
+                              {event.timestamp ? new Date(event.timestamp).toLocaleString('en-US', {
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                                second: '2-digit',
+                                hour12: false
+                              }) : '-'}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs truncate" title={event.source_ip}>
+                              {event.source_ip || '-'}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs truncate" title={event.dest_ip}>
+                              {event.dest_ip || '-'}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">
+                              {event.dest_port || '-'}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {event.subsystem && (
+                                <Badge variant="outline" className="text-xs px-1 py-0">
+                                  {event.subsystem}
+                                </Badge>
+                              )}
+                              {!event.subsystem && '-'}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {event.action && (
+                                <Badge variant="secondary" className="text-xs px-1 py-0">
+                                  {event.action}
+                                </Badge>
+                              )}
+                              {!event.action && '-'}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {event.severity && (
+                                <Badge 
+                                  variant={event.severity.toLowerCase() as 'critical' | 'high' | 'medium' | 'low' | 'info'} 
+                                  className="text-xs px-1 py-0"
+                                >
+                                  {event.severity}
+                                </Badge>
+                              )}
+                              {!event.severity && '-'}
+                            </TableCell>
+                            <TableCell className="text-xs truncate max-w-xs" title={event.content}>
+                              {event.content || '-'}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+
+                    {/* Loading indicator at bottom */}
+                    {isLoadingMore && (
+                      <div ref={loaderRef} className="flex items-center justify-center py-4">
+                        <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                      </div>
+                    )}
+
+                    {/* End of results message */}
+                    {currentPage >= totalPages && totalEvents > 0 && (
+                      <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
+                        End of results ({totalEvents} total events)
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
+                    No events available for this cluster
+                  </div>
+                )}
               </ScrollArea>
             </div>
           </div>

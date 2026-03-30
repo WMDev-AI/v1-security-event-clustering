@@ -493,10 +493,13 @@ async def predict_clusters(request: PredictRequest):
 
 
 @app.get("/cluster-events/{job_id}/{cluster_id}")
-async def get_cluster_events(job_id: str, cluster_id: int):
-    """Get all events belonging to a specific cluster"""
+async def get_cluster_events(job_id: str, cluster_id: int, page: int = 1, limit: int = 30):
+    """Get paginated events belonging to a specific cluster"""
     if job_id not in trained_models:
         raise HTTPException(status_code=404, detail="Model not found")
+    
+    if page < 1 or limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="Invalid page or limit parameters")
     
     model_data = trained_models[job_id]
     labels = model_data["labels"]
@@ -508,9 +511,15 @@ async def get_cluster_events(job_id: str, cluster_id: int):
     if not cluster_indices:
         raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} has no events")
     
+    # Calculate pagination
+    total_events = len(cluster_indices)
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    paginated_indices = cluster_indices[start_idx:end_idx]
+    
     # Build event response
     cluster_events = []
-    for idx in cluster_indices:
+    for idx in paginated_indices:
         event = events[idx]
         cluster_events.append({
             "index": idx,
@@ -527,7 +536,10 @@ async def get_cluster_events(job_id: str, cluster_id: int):
     return {
         "job_id": job_id,
         "cluster_id": cluster_id,
-        "total_events": len(cluster_events),
+        "total_events": total_events,
+        "page": page,
+        "limit": limit,
+        "total_pages": (total_events + limit - 1) // limit,
         "events": cluster_events
     }
 

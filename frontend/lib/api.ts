@@ -107,13 +107,22 @@ export async function getResults(jobId: string): Promise<AnalysisResponse> {
   return res.json();
 }
 
-export async function getClusterEvents(jobId: string, clusterId: number): Promise<{ 
+export async function getClusterEvents(
+  jobId: string, 
+  clusterId: number, 
+  page: number = 1, 
+  limit: number = 30
+): Promise<{ 
   job_id: string;
   cluster_id: number;
   total_events: number;
+  page: number;
+  limit: number;
+  total_pages: number;
   events: SecurityEvent[];
 }> {
-  const res = await fetch(`${API_BASE}/cluster-events/${jobId}/${clusterId}`);
+  const params = new URLSearchParams({ page: page.toString(), limit: limit.toString() })
+  const res = await fetch(`${API_BASE}/cluster-events/${jobId}/${clusterId}?${params}`);
   if (!res.ok) throw new Error('Failed to get cluster events');
   return res.json();
 }
