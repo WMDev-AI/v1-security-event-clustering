@@ -69,9 +69,23 @@ export default function SecurityClusteringApp() {
   useEffect(() => {
     if (!jobId || state !== 'training') return
 
-    const pollInterval = setInterval(async () => {
+    let pollInterval: NodeJS.Timeout | null = null
+    let abortController: AbortController | null = null
+    let isPolling = false
+
+    const poll = async () => {
+      // Prevent concurrent polls
+      if (isPolling) return
+      isPolling = true
+
       try {
-        const status = await getTrainingStatus(jobId)
+        // Cancel previous request if it's still pending
+        if (abortController) {
+          abortController.abort()
+        }
+        abortController = new AbortController()
+
+        const status = await getTrainingStatus(jobId, abortController.signal)
         setProgress(status)
 
         if (status.status === 'completed') {
@@ -94,11 +108,25 @@ export default function SecurityClusteringApp() {
           setState('error')
         }
       } catch (err) {
-        console.error('Polling error:', err)
+        // Don't log abort errors (expected when request is cancelled)
+        if (err instanceof Error && err.name !== 'AbortError') {
+          console.error('Polling error:', err)
+        }
+      } finally {
+        isPolling = false
       }
-    }, 1000)
+    }
 
-    return () => clearInterval(pollInterval)
+    // Start polling with 1.5 second interval to allow responses to complete
+    pollInterval = setInterval(poll, 1500)
+    
+    // Poll immediately on first load
+    poll()
+
+    return () => {
+      if (pollInterval) clearInterval(pollInterval)
+      if (abortController) abortController.abort()
+    }
   }, [jobId, state])
 
   const handleStartTraining = useCallback(async (config: TrainingRequest) => {

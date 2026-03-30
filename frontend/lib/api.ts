@@ -15,12 +15,17 @@ export interface TrainingRequest {
 export interface TrainingProgress {
   job_id: string;
   status: string;
-  progress: number;
+  progress: number;  // Overall progress 0-100
+  stage?: string;  // "initializing" | "pretraining" | "initialization" | "fine-tuning"
+  stage_progress?: number;  // Progress within current stage 0-100
   current_epoch: number;
   total_epochs: number;
+  stage_epoch?: number;  // Epoch within current stage
+  stage_total_epochs?: number;  // Total epochs for current stage
   current_loss: number;
   metrics: Record<string, unknown> | null;
   message: string;
+  stages_completed?: string[];  // e.g., ["pretraining"]
 }
 
 export interface SecurityEvent {
@@ -81,8 +86,8 @@ export async function startTraining(request: TrainingRequest): Promise<{ job_id:
   return res.json();
 }
 
-export async function getTrainingStatus(jobId: string): Promise<TrainingProgress> {
-  const res = await fetch(`${API_BASE}/train/${jobId}`);
+export async function getTrainingStatus(jobId: string, signal?: AbortSignal): Promise<TrainingProgress> {
+  const res = await fetch(`${API_BASE}/train/${jobId}`, { signal });
   if (!res.ok) throw new Error('Failed to get training status');
   return res.json();
 }

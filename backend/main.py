@@ -15,7 +15,7 @@ import uuid
 import asyncio
 from datetime import datetime
 from collections import Counter, defaultdict
-
+import asyncio
 
 from event_parser import EventParser, SecurityEvent
 from deep_clustering import (
@@ -27,6 +27,8 @@ from deep_clustering import (
 from trainer import DeepClusteringTrainer, TrainingConfig, ModelType, ClusteringMetrics
 from cluster_analyzer import ClusterAnalyzer, analyze_clusters_from_results, ClusterProfile
 from security_insights import SecurityInsightsEngine, SecurityInsight, ClusterCorrelation
+
+from multiprocessing import Manager, Process
 
 app = FastAPI(
     title="Security Event Deep Clustering API",
@@ -50,7 +52,9 @@ root_app = FastAPI()
 root_app.mount("/api", app)
 
 # Global state for training jobs
-training_jobs = {}
+#manager = Manager()
+
+training_jobs = {} # manager.dict()
 trained_models = {}
 parser = EventParser()
 analyzer = ClusterAnalyzer(parser)
@@ -90,12 +94,17 @@ class AnalyzeRequest(BaseModel):
 class TrainingProgress(BaseModel):
     job_id: str
     status: str
-    progress: float
+    progress: float  # Overall progress 0-100
+    stage: str = "initializing"  # "initializing" | "pretraining" | "initialization" | "fine-tuning"
+    stage_progress: float = 0.0  # Progress within current stage 0-100
     current_epoch: int
     total_epochs: int
+    stage_epoch: int = 0  # Epoch within current stage
+    stage_total_epochs: int = 0  # Total epochs for current stage
     current_loss: float
     metrics: Optional[dict] = None
     message: str = ""
+    stages_completed: list[str] = []  # e.g., ["pretraining"]
 
 
 class ClusterResult(BaseModel):
@@ -133,18 +142,33 @@ def parse_events_to_features(raw_events: list[str]) -> tuple[list[SecurityEvent]
     return events, features
 
 
+
 async def run_training(
     job_id: str,
-    events: list[SecurityEvent],
-    features: np.ndarray,
+    raw_events: list[str],
     config: TrainingConfig,
     model_type: ModelType
 ):
-    """Background task for training deep clustering model"""
+    """Background task for training deep clustering model - includes event parsing"""
     try:
+        # Parse events in background so endpoint response isn't delayed
+        training_jobs[job_id]["status"] = "parsing"
+        training_jobs[job_id]["message"] = "Parsing security events..."
+        await asyncio.sleep(0.5)  # yield control to allow frontend polling
+        try:
+            events, features = parse_events_to_features(raw_events)
+        except Exception as e:
+            training_jobs[job_id]["status"] = "failed"
+            training_jobs[job_id]["message"] = f"Error parsing events: {str(e)}"
+            return
+        
+
+        training_jobs[job_id]["n_events"] = len(events)
         training_jobs[job_id]["status"] = "training"
         training_jobs[job_id]["message"] = "Initializing trainer..."
         
+        await asyncio.sleep(0.5)  # yield control
+
         trainer = DeepClusteringTrainer(
             input_dim=features.shape[1],
             model_type=model_type,
@@ -152,29 +176,65 @@ async def run_training(
         )
         
         # Pretraining
+        training_jobs[job_id]["stage"] = "pretraining"
         training_jobs[job_id]["message"] = "Pretraining autoencoder..."
+        training_jobs[job_id]["stage_total_epochs"] = config.pretrain_epochs
         total_pretrain = config.pretrain_epochs
+
+        await asyncio.sleep(0.5)  # yield control
         
-        def pretrain_callback(epoch, loss):
-            training_jobs[job_id]["current_epoch"] = epoch
+        async def pretrain_callback(epoch, loss):
+            training_jobs[job_id]["current_epoch"] = epoch + 1
+            training_jobs[job_id]["stage_epoch"] = epoch + 1
             training_jobs[job_id]["current_loss"] = loss
-            training_jobs[job_id]["progress"] = (epoch + 1) / (total_pretrain + config.finetune_epochs) * 100
+            progress_pct = (epoch + 1) / total_pretrain
+            training_jobs[job_id]["stage_progress"] = progress_pct * 100
+            training_jobs[job_id]["progress"] = progress_pct * 50  # Pretraining is ~50% of total
+            await asyncio.sleep(0.05)  # yield control after each epoch
         
-        trainer.pretrain(features, pretrain_callback)
+        await trainer.pretrain(features, pretrain_callback)
+        training_jobs[job_id]["stages_completed"].append("pretraining")
         
         # Initialize clusters
+        training_jobs[job_id]["stage"] = "initialization"
         training_jobs[job_id]["message"] = "Initializing cluster centers..."
-        trainer.initialize_clusters(features)
+        training_jobs[job_id]["stage_total_epochs"] = 0  # Initialization is not epoch-based
+        training_jobs[job_id]["stage_progress"] = 0
+        training_jobs[job_id]["stage_epoch"] = 0
+        training_jobs[job_id]["progress"] = 50  # Show 50% progress during initialization
+        await asyncio.sleep(0.1)  # yield control
+        
+        async def init_callback(progress_pct):
+            training_jobs[job_id]["stage_progress"] = progress_pct
+            # Overall progress: 50% + 50% of init stage (scales 50-75% during init)
+            training_jobs[job_id]["progress"] = 50 + (progress_pct * 0.5)
+            await asyncio.sleep(0.05)  # yield control during initialization
+        
+        await trainer.initialize_clusters(features, progress_callback=init_callback)
+        
+        training_jobs[job_id]["stages_completed"].append("initialization")
+        training_jobs[job_id]["stage_progress"] = 100
+        training_jobs[job_id]["progress"] = 75  # At 75% after initialization
         
         # Fine-tuning
+        training_jobs[job_id]["stage"] = "fine-tuning"
         training_jobs[job_id]["message"] = "Fine-tuning with clustering objective..."
+        training_jobs[job_id]["stage_total_epochs"] = config.finetune_epochs
+        training_jobs[job_id]["stage_epoch"] = 0
+        training_jobs[job_id]["stage_progress"] = 0
         
-        def finetune_callback(epoch, metrics):
-            training_jobs[job_id]["current_epoch"] = total_pretrain + epoch
+        await asyncio.sleep(0.1)  # yield control
+        
+        async def finetune_callback(epoch, metrics):
+            training_jobs[job_id]["current_epoch"] = total_pretrain + epoch + 1
+            training_jobs[job_id]["stage_epoch"] = epoch + 1
             training_jobs[job_id]["metrics"] = metrics
-            training_jobs[job_id]["progress"] = (total_pretrain + epoch + 1) / (total_pretrain + config.finetune_epochs) * 100
+            progress_pct = (epoch + 1) / config.finetune_epochs
+            training_jobs[job_id]["stage_progress"] = progress_pct * 100
+            training_jobs[job_id]["progress"] = 50 + (progress_pct * 50)  # Fine-tuning is the other ~50%
+            await asyncio.sleep(0.05)  # yield control after each epoch
         
-        trainer.finetune(features, progress_callback=finetune_callback)
+        await trainer.finetune(features, progress_callback=finetune_callback)
         
         # Get final results
         labels = trainer.predict(features)
@@ -208,6 +268,9 @@ async def run_training(
         training_jobs[job_id]["message"] = str(e)
         raise
 
+async def delayed_training(job_id, events, config, model_type):
+    await asyncio.sleep(2)  # wait before starting
+    await run_training(job_id, events, config, model_type)
 
 # API Endpoints
 @app.get("/health")
@@ -266,12 +329,6 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
             detail="Too many clusters for the number of events"
         )
     
-    # Parse events
-    try:
-        events, features = parse_events_to_features(request.events)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error parsing events: {str(e)}")
-    
     # Create training config
     config = TrainingConfig(
         hidden_dims=request.hidden_dims,
@@ -285,35 +342,46 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
         finetune_lr=request.learning_rate / 10
     )
     
-    # Create job
+    # Create job - store raw events, parsing happens in background
     job_id = str(uuid.uuid4())
     model_type = ModelType(request.model_type.value)
     
     training_jobs[job_id] = {
         "job_id": job_id,
-        "status": "starting",
+        "status": "queued",
         "progress": 0,
+        "stage": "initializing",
+        "stage_progress": 0,
         "current_epoch": 0,
         "total_epochs": config.pretrain_epochs + config.finetune_epochs,
+        "stage_epoch": 0,
+        "stage_total_epochs": 0,
         "current_loss": 0.0,
         "metrics": None,
-        "message": "Parsing events...",
+        "message": "Queued - waiting to parse events...",
+        "stages_completed": [],
         "model_type": request.model_type.value,
-        "n_events": len(events),
+        "n_events": len(request.events),  # Raw event count
         "n_clusters": request.n_clusters,
         "created_at": datetime.now().isoformat()
     }
     
-    # Start training in background
+    # Start training in background (response returned immediately)
     background_tasks.add_task(
-        run_training,
+        delayed_training, #run_training,
         job_id,
-        events,
-        features,
+        request.events,  # Pass raw events, not parsed
         config,
         model_type
     )
-    
+
+    # p = Process(
+    #     target=run_training,
+    #     args=(job_id, request.events, config, model_type)
+    # )
+    # p.start()
+
+    print(f"Started training job {job_id} with model {model_type.value}")
     return {"job_id": job_id, "message": "Training started"}
 
 

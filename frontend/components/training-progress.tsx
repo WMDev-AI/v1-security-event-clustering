@@ -8,6 +8,8 @@ import {
   Brain,
   Cpu,
   Activity,
+  Zap,
+  Settings2,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
@@ -100,12 +102,92 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
 
           <div className="bg-muted/50 rounded-lg p-3 text-center">
             <div className="flex items-center justify-center gap-1.5 text-muted-foreground mb-1">
-              <Brain className="h-3.5 w-3.5" />
-              <span className="text-xs">Phase</span>
+              <Zap className="h-3.5 w-3.5" />
+              <span className="text-xs">Stage</span>
             </div>
-            <div className="text-sm font-medium truncate">
-              {progress.current_epoch <= progress.total_epochs / 2 ? 'Pretrain' : 'Finetune'}
+            <div className="text-sm font-medium truncate capitalize">
+              {progress.stage?.replace('-', ' ') || 'Initializing'}
             </div>
+          </div>
+        </div>
+
+        {/* Stage Breakdown */}
+        <div className="border-t pt-4 space-y-3">
+          <h4 className="text-sm font-medium">Training Stages</h4>
+          
+          {/* Pretraining Stage */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                {progress.stages_completed?.includes('pretraining') ? (
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                ) : progress.stage === 'pretraining' ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                ) : (
+                  <div className="h-4 w-4 rounded-full border-2 border-muted" />
+                )}
+                <span className="font-medium">Pretraining</span>
+              </div>
+              {progress.stage === 'pretraining' && Number(progress.stage_total_epochs) > 0 && (
+                <span className="text-muted-foreground">
+                  {progress.stage_epoch}/{progress.stage_total_epochs}
+                </span>
+              )}
+            </div>
+            {progress.stage === 'pretraining' && Number(progress.stage_total_epochs) > 0 && (
+              <Progress 
+                value={progress.stage_progress || 0} 
+                className="h-1.5"
+              />
+            )}
+          </div>
+
+          {/* Initialization Stage */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                {progress.stages_completed?.includes('initialization') ? (
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                ) : progress.stage === 'initialization' ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                ) : (
+                  <div className="h-4 w-4 rounded-full border-2 border-muted" />
+                )}
+                <span className="font-medium">Initialization</span>
+              </div>
+            </div>
+            {progress.stage === 'initialization' && (
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-full bg-blue-500 animate-pulse" />
+              </div>
+            )}
+          </div>
+
+          {/* Fine-tuning Stage */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                {progress.stages_completed?.includes('fine-tuning') ? (
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                ) : progress.stage === 'fine-tuning' ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                ) : (
+                  <div className="h-4 w-4 rounded-full border-2 border-muted" />
+                )}
+                <span className="font-medium">Fine-tuning</span>
+              </div>
+              {progress.stage === 'fine-tuning' && Number(progress.stage_total_epochs) > 0 && (
+                <span className="text-muted-foreground">
+                  {Number(progress.stage_epoch)}/{Number(progress.stage_total_epochs)}
+                </span>
+              )}
+            </div>
+            {progress.stage === 'fine-tuning' && Number(progress.stage_total_epochs) > 0 && (
+              <Progress 
+                value={progress.stage_progress || 0} 
+                className="h-1.5"
+              />
+            )}
           </div>
         </div>
 

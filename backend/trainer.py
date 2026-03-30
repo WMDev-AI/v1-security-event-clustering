@@ -8,9 +8,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score, silhouette_score
-from typing import Optional, Callable
+from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass
 from enum import Enum
+import asyncio
+import inspect
 
 from deep_clustering import (
     DeepEmbeddedClustering,
@@ -181,17 +183,17 @@ class DeepClusteringTrainer:
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
     
-    def pretrain(
+    async def pretrain(
         self,
         data: np.ndarray,
-        progress_callback: Optional[Callable[[int, float], None]] = None
+        progress_callback: Optional[Callable[[int, float], Awaitable[None]]] = None
     ):
         """
         Pretrain the autoencoder for reconstruction
         
         Args:
             data: Training data [n_samples, n_features]
-            progress_callback: Optional callback(epoch, loss) for progress reporting
+            progress_callback: Optional async callback(epoch, loss) for progress reporting
         """
         print(f"Pretraining autoencoder for {self.config.pretrain_epochs} epochs...")
         
@@ -209,7 +211,7 @@ class DeepClusteringTrainer:
             autoencoder = self.model.vae
         elif self.model_type == ModelType.CONTRASTIVE:
             # For contrastive, we pretrain the encoder differently
-            self._pretrain_contrastive(loader, progress_callback)
+            await self._pretrain_contrastive(loader, progress_callback)
             self.is_pretrained = True
             return
         else:
@@ -250,7 +252,10 @@ class DeepClusteringTrainer:
             scheduler.step()
             
             if progress_callback:
-                progress_callback(epoch, avg_loss)
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(epoch, avg_loss)
+                else:
+                    progress_callback(epoch, avg_loss)
             
             if (epoch + 1) % 10 == 0:
                 print(f"Pretrain Epoch {epoch + 1}/{self.config.pretrain_epochs}, Loss: {avg_loss:.6f}")
@@ -258,10 +263,10 @@ class DeepClusteringTrainer:
         self.is_pretrained = True
         print("Pretraining complete!")
     
-    def _pretrain_contrastive(
+    async def _pretrain_contrastive(
         self,
         loader: DataLoader,
-        progress_callback: Optional[Callable[[int, float], None]] = None
+        progress_callback: Optional[Callable[[int, float], Awaitable[None]]] = None
     ):
         """Pretrain contrastive model with augmentation"""
         optimizer = optim.Adam(
@@ -299,13 +304,21 @@ class DeepClusteringTrainer:
             self.history['pretrain_loss'].append(avg_loss)
             
             if progress_callback:
-                progress_callback(epoch, avg_loss)
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(epoch, avg_loss)
+                else:
+                    progress_callback(epoch, avg_loss)
             
             if (epoch + 1) % 10 == 0:
                 print(f"Contrastive Pretrain Epoch {epoch + 1}/{self.config.pretrain_epochs}, Loss: {avg_loss:.6f}")
     
-    def initialize_clusters(self, data: np.ndarray) -> np.ndarray:
-        """Initialize cluster centers using K-Means on latent space"""
+    async def initialize_clusters(self, data: np.ndarray, progress_callback: Optional[Callable[[float], Awaitable[None]]] = None) -> np.ndarray:
+        """Initialize cluster centers using K-Means on latent space
+        
+        Args:
+            data: Training data
+            progress_callback: Optional async callback(progress_pct) for progress updates (0-100)
+        """
         print("Initializing cluster centers...")
         
         dataset = TensorDataset(torch.tensor(data, dtype=torch.float32))
@@ -313,32 +326,74 @@ class DeepClusteringTrainer:
         
         if self.model_type == ModelType.VADE:
             initial_labels = self.model.initialize_gmm(loader, self.device)
+            if progress_callback:
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(100)
+                else:
+                    progress_callback(100)
         elif self.model_type == ModelType.CONTRASTIVE:
             # K-Means on latent space
             self.model.eval()
             latent_vectors = []
+            total_batches = len(loader)
+            
             with torch.no_grad():
-                for batch in loader:
+                for i, batch in enumerate(loader):
                     x = batch[0].to(self.device)
                     z = self.model.encode(x)
                     latent_vectors.append(z.cpu().numpy())
+                    
+                    # Report progress during encoding
+                    if progress_callback:
+                        encode_progress = ((i + 1) / total_batches) * 30  # First 30%
+                        if inspect.iscoroutinefunction(progress_callback):
+                            await progress_callback(encode_progress)
+                        else:
+                            progress_callback(encode_progress)
+            
             latent_vectors = np.concatenate(latent_vectors, axis=0)
             
             from sklearn.cluster import KMeans
-            kmeans = KMeans(n_clusters=self.config.n_clusters, n_init=20, random_state=42)
-            initial_labels = kmeans.fit_predict(latent_vectors)
+            
+            # Custom K-Means with progress callback
+            best_inertia = float('inf')
+            best_labels = None
+            n_init = min(20, max(3, len(latent_vectors) // 1000))  # Adaptive n_init based on data size
+            
+            for init_idx in range(n_init):
+                kmeans = KMeans(n_clusters=self.config.n_clusters, n_init=1, random_state=42 + init_idx, max_iter=300)
+                labels = kmeans.fit_predict(latent_vectors)
+                
+                if kmeans.inertia_ < best_inertia:
+                    best_inertia = kmeans.inertia_
+                    best_labels = labels
+                
+                # Report progress during K-Means iterations
+                if progress_callback:
+                    kmeans_progress = 30 + ((init_idx + 1) / n_init) * 70  # 30-100%
+                    if inspect.iscoroutinefunction(progress_callback):
+                        await progress_callback(min(100, kmeans_progress))
+                    else:
+                        progress_callback(min(100, kmeans_progress))
+            
+            initial_labels = best_labels
         else:
             initial_labels = self.model.initialize_clusters(loader, self.device)
+            if progress_callback:
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(100)
+                else:
+                    progress_callback(100)
         
         self.is_clusters_initialized = True
         print(f"Clusters initialized. Distribution: {np.bincount(initial_labels)}")
         return initial_labels
     
-    def finetune(
+    async def finetune(
         self,
         data: np.ndarray,
         labels_true: Optional[np.ndarray] = None,
-        progress_callback: Optional[Callable[[int, dict], None]] = None
+        progress_callback: Optional[Callable[[int, dict], Awaitable[None]]] = None
     ):
         """
         Fine-tune with clustering objective
@@ -346,14 +401,14 @@ class DeepClusteringTrainer:
         Args:
             data: Training data
             labels_true: Optional ground truth labels for evaluation
-            progress_callback: Optional callback(epoch, metrics) for progress
+            progress_callback: Optional async callback(epoch, metrics) for progress
         """
         if not self.is_pretrained:
             print("Warning: Model not pretrained. Running pretraining first...")
-            self.pretrain(data)
+            await self.pretrain(data)
         
         if not self.is_clusters_initialized:
-            self.initialize_clusters(data)
+            await self.initialize_clusters(data)
         
         print(f"Fine-tuning for {self.config.finetune_epochs} epochs...")
         
@@ -450,7 +505,10 @@ class DeepClusteringTrainer:
                 self.history['metrics'].append(metrics)
                 
                 if progress_callback:
-                    progress_callback(epoch, metrics)
+                    if inspect.iscoroutinefunction(progress_callback):
+                        await progress_callback(epoch, metrics)
+                    else:
+                        progress_callback(epoch, metrics)
                 
                 print(f"Epoch {epoch + 1}/{self.config.finetune_epochs}, "
                       f"Loss: {epoch_losses['total']:.6f}, "
