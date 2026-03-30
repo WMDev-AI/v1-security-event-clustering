@@ -107,6 +107,17 @@ export async function getResults(jobId: string): Promise<AnalysisResponse> {
   return res.json();
 }
 
+export async function getClusterEvents(jobId: string, clusterId: number): Promise<{ 
+  job_id: string;
+  cluster_id: number;
+  total_events: number;
+  events: SecurityEvent[];
+}> {
+  const res = await fetch(`${API_BASE}/cluster-events/${jobId}/${clusterId}`);
+  if (!res.ok) throw new Error('Failed to get cluster events');
+  return res.json();
+}
+
 export async function getDemoEvents(): Promise<{ sample_events: string[] }> {
   const res = await fetch(`${API_BASE}/demo`);
   if (!res.ok) throw new Error('Failed to get demo events');

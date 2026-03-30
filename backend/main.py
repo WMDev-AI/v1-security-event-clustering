@@ -492,6 +492,46 @@ async def predict_clusters(request: PredictRequest):
     return {"predictions": results}
 
 
+@app.get("/cluster-events/{job_id}/{cluster_id}")
+async def get_cluster_events(job_id: str, cluster_id: int):
+    """Get all events belonging to a specific cluster"""
+    if job_id not in trained_models:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    model_data = trained_models[job_id]
+    labels = model_data["labels"]
+    events = model_data["events"]
+    
+    # Get indices of events in this cluster
+    cluster_indices = [i for i, label in enumerate(labels) if label == cluster_id]
+    
+    if not cluster_indices:
+        raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} has no events")
+    
+    # Build event response
+    cluster_events = []
+    for idx in cluster_indices:
+        event = events[idx]
+        cluster_events.append({
+            "index": idx,
+            "timestamp": event.timestamp,
+            "source_ip": event.source_ip,
+            "dest_ip": event.dest_ip,
+            "dest_port": event.dest_port,
+            "subsystem": event.subsystem,
+            "action": event.action,
+            "severity": event.severity,
+            "content": event.content
+        })
+    
+    return {
+        "job_id": job_id,
+        "cluster_id": cluster_id,
+        "total_events": len(cluster_events),
+        "events": cluster_events
+    }
+
+
 @app.post("/analyze")
 async def analyze_events(request: AnalyzeRequest):
     """Analyze events using trained model and return security insights"""

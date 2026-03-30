@@ -408,7 +408,7 @@ export default function SecurityClusteringApp() {
 
               <TabsContent value="clusters">
                 <ScrollArea className="h-[calc(100vh-400px)]">
-                  <ClusterDetails clusters={results.clusters} />
+                  <ClusterDetails clusters={results.clusters} jobId={jobId || undefined} />
                 </ScrollArea>
               </TabsContent>
 

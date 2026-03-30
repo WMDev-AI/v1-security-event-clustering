@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Shield,
   AlertTriangle,
@@ -16,11 +16,21 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import type { ClusterResult, SecurityEvent } from '@/lib/api'
+import { getClusterEvents } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 interface ClusterDetailsProps {
   clusters: ClusterResult[]
+  jobId?: string
 }
 
 function ThreatBadge({ level }: { level: string }) {
@@ -32,8 +42,25 @@ function ThreatBadge({ level }: { level: string }) {
   )
 }
 
-function ClusterCard({ cluster }: { cluster: ClusterResult }) {
+function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
+  const [clusterEvents, setClusterEvents] = useState<SecurityEvent[] | null>(null)
+  const [isLoadingEvents, setIsLoadingEvents] = useState(false)
+  const [showAllEvents, setShowAllEvents] = useState(false)
+
+  useEffect(() => {
+    if (isExpanded && jobId && !clusterEvents) {
+      setIsLoadingEvents(true)
+      getClusterEvents(jobId, cluster.cluster_id)
+        .then(data => setClusterEvents(data.events))
+        .catch(error => console.error('Failed to load cluster events:', error))
+        .finally(() => setIsLoadingEvents(false))
+    }
+  }, [isExpanded, jobId, cluster.cluster_id, clusterEvents])
+
+  const displayedEvents = showAllEvents && clusterEvents
+    ? clusterEvents 
+    : (clusterEvents?.slice(0, 3) ?? cluster.representative_events.slice(0, 3))
 
   return (
     <Card className={cn(
@@ -161,44 +188,121 @@ function ClusterCard({ cluster }: { cluster: ClusterResult }) {
             </div>
           )}
 
-          {/* Representative Events */}
-          {cluster.representative_events.length > 0 && (
-            <div>
-              <h4 className="text-sm font-medium mb-2 flex items-center gap-1.5">
+          {/* Events Table */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-sm font-medium flex items-center gap-1.5">
                 <Clock className="h-4 w-4" />
-                Sample Events
+                Cluster Events {clusterEvents && `(${clusterEvents.length})`}
               </h4>
-              <ScrollArea className="h-[150px]">
-                <div className="space-y-2">
-                  {cluster.representative_events.map((event: SecurityEvent, i: number) => (
-                    <div key={i} className="text-xs bg-muted/50 rounded p-2 font-mono">
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                        {event.timestamp && <span>ts={event.timestamp}</span>}
-                        {event.source_ip && <span>src={event.source_ip}</span>}
-                        {event.dest_ip && <span>dst={event.dest_ip}</span>}
-                        {event.dest_port && <span>port={event.dest_port}</span>}
-                        {event.subsystem && <span>sys={event.subsystem}</span>}
-                        {event.action && <span>act={event.action}</span>}
-                        {event.severity && <span>sev={event.severity}</span>}
-                      </div>
-                      {event.content && (
-                        <div className="mt-1 text-foreground truncate">
-                          content=&apos;{event.content}&apos;
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
+              {clusterEvents && clusterEvents.length > 3 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs"
+                  onClick={() => setShowAllEvents(!showAllEvents)}
+                >
+                  {showAllEvents ? 'Show Less' : `Show All (${clusterEvents.length})`}
+                </Button>
+              )}
             </div>
-          )}
+
+            {isLoadingEvents ? (
+              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                Loading events...
+              </div>
+            ) : clusterEvents && clusterEvents.length > 0 ? (
+              <div className="border rounded-lg overflow-hidden">
+                <ScrollArea className={cn(
+                  "w-full",
+                  showAllEvents ? "h-[500px]" : "h-[300px]"
+                )}>
+                  <Table className="text-xs">
+                    <TableHeader className="sticky top-0 bg-muted/80">
+                      <TableRow>
+                        <TableHead className="w-12">#</TableHead>
+                        <TableHead className="w-24">Timestamp</TableHead>
+                        <TableHead className="w-20">Source IP</TableHead>
+                        <TableHead className="w-20">Dest IP</TableHead>
+                        <TableHead className="w-12">Port</TableHead>
+                        <TableHead className="w-16">Subsystem</TableHead>
+                        <TableHead className="w-16">Action</TableHead>
+                        <TableHead className="w-12">Severity</TableHead>
+                        <TableHead>Content</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {displayedEvents.map((event: SecurityEvent, i: number) => (
+                        <TableRow key={i} className="hover:bg-muted/50">
+                          <TableCell className="font-mono text-xs">{i + 1}</TableCell>
+                          <TableCell className="font-mono text-xs truncate">
+                            {event.timestamp ? new Date(event.timestamp).toLocaleString('en-US', {
+                              month: '2-digit',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                              hour12: false
+                            }) : '-'}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs truncate" title={event.source_ip}>
+                            {event.source_ip || '-'}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs truncate" title={event.dest_ip}>
+                            {event.dest_ip || '-'}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {event.dest_port || '-'}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {event.subsystem && (
+                              <Badge variant="outline" className="text-xs px-1 py-0">
+                                {event.subsystem}
+                              </Badge>
+                            )}
+                            {!event.subsystem && '-'}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {event.action && (
+                              <Badge variant="secondary" className="text-xs px-1 py-0">
+                                {event.action}
+                              </Badge>
+                            )}
+                            {!event.action && '-'}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {event.severity && (
+                              <Badge 
+                                variant={event.severity.toLowerCase() as 'critical' | 'high' | 'medium' | 'low' | 'info'} 
+                                className="text-xs px-1 py-0"
+                              >
+                                {event.severity}
+                              </Badge>
+                            )}
+                            {!event.severity && '-'}
+                          </TableCell>
+                          <TableCell className="text-xs truncate max-w-xs" title={event.content}>
+                            {event.content || '-'}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </ScrollArea>
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground py-4">
+                No events available for this cluster
+              </div>
+            )}
+          </div>
         </CardContent>
       )}
     </Card>
   )
 }
 
-export function ClusterDetails({ clusters }: ClusterDetailsProps) {
+export function ClusterDetails({ clusters, jobId }: ClusterDetailsProps) {
   const sortedClusters = [...clusters].sort((a, b) => {
     const threatOrder = { critical: 0, high: 1, medium: 2, low: 3, info: 4, unknown: 5 }
     const orderA = threatOrder[a.threat_level as keyof typeof threatOrder] ?? 5
@@ -227,7 +331,7 @@ export function ClusterDetails({ clusters }: ClusterDetailsProps) {
       {/* Cluster Cards */}
       <div className="space-y-3">
         {sortedClusters.map(cluster => (
-          <ClusterCard key={cluster.cluster_id} cluster={cluster} />
+          <ClusterCard key={cluster.cluster_id} cluster={cluster} jobId={jobId} />
         ))}
       </div>
     </div>
