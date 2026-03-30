@@ -2,6 +2,10 @@
 
 This document provides a comprehensive overview of how the backend works end-to-end, including architecture, components, data flow, and known issues.
 
+```
+uvicorn main:root_app --reload
+```
+
 ## System Overview
 
 The backend is a **FastAPI application** that implements a **deep learning-based security event clustering pipeline**. It processes raw security event logs, converts them into numerical embeddings, clusters them using various deep learning models, and extracts security insights.
