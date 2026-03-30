@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Brain,
   Layers,
@@ -15,7 +15,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Slider } from '@/components/ui/slider'
-import { Textarea } from '@/components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -34,7 +33,7 @@ import type { TrainingRequest } from '@/lib/api'
 interface TrainingConfigProps {
   onSubmit: (config: TrainingRequest) => void
   isLoading: boolean
-  sampleEvents: string[]
+  sampleEvents?: string[]
   preloadedEvents?: string[]
   preloadedFilename?: string
 }
@@ -67,17 +66,24 @@ const MODEL_INFO = {
 }
 
 export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEvents, preloadedFilename }: TrainingConfigProps) {
-  const [events, setEvents] = useState<string>(preloadedEvents?.length ? preloadedEvents.join('\n') : sampleEvents.join('\n'))
+  const [events, setEvents] = useState<string>(preloadedEvents?.join('\n') || '')
   const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive'>('idec')
   const [nClusters, setNClusters] = useState(10)
   const [latentDim, setLatentDim] = useState(32)
   const [pretrainEpochs, setPretrainEpochs] = useState(30)
   const [finetuneEpochs, setFinetuneEpochs] = useState(50)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  
+  // Update events when preloaded events change
+  useEffect(() => {
+    if (preloadedEvents && preloadedEvents.length > 0) {
+      setEvents(preloadedEvents.join('\n'))
+    }
+  }, [preloadedEvents])
 
   const eventLines = events.trim().split('\n').filter(l => l.trim())
   const eventCount = eventLines.length
-  const isValid = eventCount >= 100
+  const isValid = eventCount >= 100 && preloadedFilename
 
   const handleSubmit = () => {
     const config: TrainingRequest = {
@@ -97,40 +103,60 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
   return (
     <TooltipProvider>
       <div className="space-y-6">
-        {/* Event Input */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Layers className="h-4 w-4" />
-              Security Events
-            </CardTitle>
-            <CardDescription>
-              {preloadedFilename ? `Loaded from: ${preloadedFilename}` : 'Paste your security events (one per line, key=value format)'}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <Textarea
-              value={events}
-              onChange={(e) => setEvents(e.target.value)}
-              placeholder="timestamp=2024-01-15 08:30:00 sourceip=192.168.1.100 destip=10.0.0.50 destport=443 subsys=firewall action=allow"
-              className="h-[200px] font-mono text-xs"
-            />
-            <div className="flex items-center justify-between text-sm">
-              <span className={eventCount < 100 ? 'text-destructive' : 'text-muted-foreground'}>
-                {eventCount} events {eventCount < 100 && '(minimum 100 required)'}
-              </span>
-              {!preloadedFilename && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setEvents(sampleEvents.join('\n'))}
-                >
-                  Load Sample Events
-                </Button>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        {/* Uploaded File Info */}
+        {preloadedFilename ? (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Layers className="h-4 w-4" />
+                Uploaded Security Events
+              </CardTitle>
+              <CardDescription>
+                Events loaded from your file
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-sm font-medium text-gray-700">Filename:</span>
+                    <span className="text-sm font-mono text-gray-900">{preloadedFilename}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm font-medium text-gray-700">Total Events:</span>
+                    <span className={`text-sm font-bold ${eventCount >= 100 ? 'text-green-600' : 'text-red-600'}`}>
+                      {eventCount}
+                    </span>
+                  </div>
+                  {eventCount < 100 && (
+                    <p className="text-sm text-red-600 font-medium">
+                      ⚠️ Minimum 100 events required. Please upload a larger file.
+                    </p>
+                  )}
+                  {eventCount >= 100 && (
+                    <p className="text-sm text-green-600 font-medium">
+                      ✓ Ready for training
+                    </p>
+                  )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card className="border-red-200 bg-red-50">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2 text-red-900">
+                <Layers className="h-4 w-4" />
+                No File Uploaded
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-red-700">
+                Please upload a security event log file first to proceed. Use the upload section above.
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Model Selection */}
         <Card>

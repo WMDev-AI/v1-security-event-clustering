@@ -285,27 +285,45 @@ export default function SecurityClusteringApp() {
             <Button
               variant="ghost"
               className="mb-4"
-              onClick={() => setState('idle')}
+              onClick={() => {
+                setState('idle')
+                setLoadedEvents([])
+                setUploadedFilename('')
+              }}
             >
               ← Back
             </Button>
             
-            {/* File Upload Section */}
-            <EventLogUpload 
-              onEventsLoaded={(events, filename) => {
-                setLoadedEvents(events)
-                setUploadedFilename(filename)
-              }}
-            />
+            {/* File Upload Section - Allow changing file */}
+            <div>
+              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                <span>Step 1: Upload Event Log File</span>
+                {uploadedFilename && (
+                  <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">✓ Uploaded</span>
+                )}
+              </h3>
+              <EventLogUpload 
+                onEventsLoaded={(events, filename) => {
+                  setLoadedEvents(events)
+                  setUploadedFilename(filename)
+                }}
+              />
+            </div>
             
             {/* Training Config */}
-            <TrainingConfig
-              onSubmit={handleStartTraining}
-              isLoading={false}
-              sampleEvents={sampleEvents}
-              preloadedEvents={loadedEvents}
-              preloadedFilename={uploadedFilename}
-            />
+            {uploadedFilename && (
+              <div>
+                <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                  Step 2: Configure Training
+                </h3>
+                <TrainingConfig
+                  onSubmit={handleStartTraining}
+                  isLoading={false}
+                  preloadedEvents={loadedEvents}
+                  preloadedFilename={uploadedFilename}
+                />
+              </div>
+            )}
           </div>
         )}
 
