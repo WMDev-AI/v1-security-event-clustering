@@ -671,9 +671,14 @@ class EventParser:
             zone_hash = float(hash(zone_pair) % 256) / 255.0 if zone_pair != "-" else 0.0
             features.append(zone_hash)
         
-        # Ensure we always return at least some padding if new subsystem
-        if len(features) == 0:
-            features = [0.0] * 10  # Padding for unknown subsystems
+        # Pad all subsystem features to exactly 12 dimensions for consistency
+        # This ensures all feature vectors are the same length (50 base + 12 subsystem = 62 total)
+        while len(features) < 12:
+            features.append(0.0)
+        
+        # Trim to 12 if somehow exceeded (shouldn't happen, but safety check)
+        if len(features) > 12:
+            features = features[:12]
         
         return features
     

@@ -16,7 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import type { ClusterResult } from '@/lib/api'
+import type { ClusterResult, SecurityEvent } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 interface ClusterDetailsProps {
@@ -170,20 +170,20 @@ function ClusterCard({ cluster }: { cluster: ClusterResult }) {
               </h4>
               <ScrollArea className="h-[150px]">
                 <div className="space-y-2">
-                  {cluster.representative_events.map((event, i) => (
+                  {cluster.representative_events.map((event: SecurityEvent, i: number) => (
                     <div key={i} className="text-xs bg-muted/50 rounded p-2 font-mono">
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
-                        {event.timestamp && <span>ts={String(event.timestamp)}</span>}
-                        {event.source_ip && <span>src={String(event.source_ip)}</span>}
-                        {event.dest_ip && <span>dst={String(event.dest_ip)}</span>}
-                        {event.dest_port && <span>port={String(event.dest_port)}</span>}
-                        {event.subsystem && <span>sys={String(event.subsystem)}</span>}
-                        {event.action && <span>act={String(event.action)}</span>}
-                        {event.severity && <span>sev={String(event.severity)}</span>}
+                        {event.timestamp && <span>ts={event.timestamp}</span>}
+                        {event.source_ip && <span>src={event.source_ip}</span>}
+                        {event.dest_ip && <span>dst={event.dest_ip}</span>}
+                        {event.dest_port && <span>port={event.dest_port}</span>}
+                        {event.subsystem && <span>sys={event.subsystem}</span>}
+                        {event.action && <span>act={event.action}</span>}
+                        {event.severity && <span>sev={event.severity}</span>}
                       </div>
                       {event.content && (
                         <div className="mt-1 text-foreground truncate">
-                          content=&apos;{String(event.content)}&apos;
+                          content=&apos;{event.content}&apos;
                         </div>
                       )}
                     </div>

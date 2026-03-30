@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
+import type { SecurityEvent } from "@/lib/api";
 import {
   Tooltip,
   TooltipContent,
@@ -21,7 +22,7 @@ interface SecurityInsight {
   severity: string;
   confidence: number;
   event_count: number;
-  sample_events: Array<Record<string, unknown>>;
+  sample_events: SecurityEvent[];
   affected_subsystems: string[];
   source_ips: string[];
   target_assets: string[];
@@ -465,15 +466,15 @@ export function SecurityInsights({ data, loading }: SecurityInsightsProps) {
                             {selectedInsight.sample_events.map((event, idx) => (
                               <div key={idx} className="p-2 rounded bg-muted text-xs font-mono">
                                 <div className="text-muted-foreground">
-                                  {event.timestamp as string}
+                                  {event.timestamp}
                                 </div>
                                 <div>
-                                  {event.source_ip as string} → {event.dest_ip as string}:
-                                  {event.dest_port as number}
+                                  {event.source_ip} -&gt; {event.dest_ip}:
+                                  {event.dest_port}
                                 </div>
                                 {event.content && (
                                   <div className="text-muted-foreground mt-1 truncate">
-                                    {event.content as string}
+                                    {event.content}
                                   </div>
                                 )}
                               </div>

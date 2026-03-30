@@ -123,7 +123,7 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
               {progress.metrics.n_clusters_found !== undefined && (
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Clusters Found</span>
-                  <span className="font-mono">{progress.metrics.n_clusters_found}</span>
+                  <span className="font-mono">{Number(progress.metrics.n_clusters_found)}</span>
                 </div>
               )}
             </div>

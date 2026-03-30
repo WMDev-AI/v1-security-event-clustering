@@ -23,6 +23,18 @@ export interface TrainingProgress {
   message: string;
 }
 
+export interface SecurityEvent {
+  timestamp?: string;
+  source_ip?: string;
+  dest_ip?: string;
+  dest_port?: number;
+  subsystem?: string;
+  action?: string;
+  severity?: string;
+  content?: string;
+  [key: string]: unknown;
+}
+
 export interface ClusterResult {
   cluster_id: number;
   size: number;
@@ -33,7 +45,7 @@ export interface ClusterResult {
   recommended_actions: string[];
   top_source_ips: [string, number][];
   top_dest_ports: [number, number][];
-  representative_events: Record<string, unknown>[];
+  representative_events: SecurityEvent[];
 }
 
 export interface AnalysisResponse {
