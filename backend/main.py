@@ -2,12 +2,14 @@
 Security Event Deep Clustering API
 FastAPI backend for processing and clustering security events
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 
 from pydantic import BaseModel, Field
 from typing import Optional
+import csv
+import json
 import numpy as np
 import torch
 from enum import Enum
@@ -15,7 +17,6 @@ import uuid
 import asyncio
 from datetime import datetime
 from collections import Counter, defaultdict
-import asyncio
 
 from event_parser import EventParser, SecurityEvent
 from deep_clustering import (
@@ -562,6 +563,169 @@ async def get_demo_events():
         "total_samples": len(sample_events),
         "note": "Use these as template for your security event format"
     }
+
+
+class FileUploadResponse(BaseModel):
+    filename: str
+    total_events: int
+    events: list[str]
+    format_detected: str
+    sample_events: list[str]
+    errors: list[str] = []
+
+
+@app.post("/upload")
+async def upload_event_log(file: UploadFile = File(...)):
+    """
+    Upload security event log file for processing
+    
+    Supports:
+    - .txt: One event per line
+    - .csv: Each row as an event (automatically formatted)
+    - .json: Array of events or JSONL format (one JSON per line)
+    
+    Returns parsed events ready for training
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    # Get file extension
+    file_ext = file.filename.split('.')[-1].lower() if '.' in file.filename else ''
+    errors = []
+    events = []
+    format_detected = "unknown"
+    
+    try:
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        
+        if file_ext == 'json':
+            # Try JSONL format first (one JSON per line)
+            format_detected = "jsonl"
+            lines = content_str.strip().split('\n')
+            event_count = 0
+            
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    # Convert dict to space-separated key=value format
+                    event_str = ' '.join([f'{k}={v}' for k, v in obj.items()])
+                    events.append(event_str)
+                    event_count += 1
+                except json.JSONDecodeError:
+                    # Fall back to array format
+                    format_detected = "json_array"
+                    try:
+                        data = json.loads(content_str)
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict):
+                                    event_str = ' '.join([f'{k}={v}' for k, v in item.items()])
+                                    events.append(event_str)
+                                elif isinstance(item, str):
+                                    events.append(item)
+                        break
+                    except json.JSONDecodeError as e:
+                        errors.append(f"Invalid JSON format: {str(e)}")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid JSON file: {str(e)}"
+                        )
+        
+        elif file_ext == 'csv':
+            format_detected = "csv"
+            lines = content_str.strip().split('\n')
+            
+            if not lines:
+                raise HTTPException(status_code=400, detail="CSV file is empty")
+            
+            reader = list(csv.reader(lines))
+            
+            # Treat first row as header if it looks like headers
+            start_idx = 0
+            if len(reader) > 0 and all(cell.lower() in ['timestamp', 'sourceip', 'source_ip', 'destip', 'dest_ip', 'destport', 'dest_port', 'subsys', 'subsystem', 'action', 'severity', 'content', 'event'] for cell in reader[0]):
+                headers = reader[0]
+                start_idx = 1
+            else:
+                # Auto-generate headers
+                headers = [f'field_{i}' for i in range(len(reader[0])) ] if reader else []
+            
+            # Convert rows to events
+            for row in reader[start_idx:]:
+                if not row or all(not cell.strip() for cell in row):
+                    continue
+                
+                event_dict = {}
+                for i, cell in enumerate(row):
+                    if i < len(headers):
+                        event_dict[headers[i]] = cell.strip()
+                
+                # Convert to space-separated format
+                event_str = ' '.join([f'{k}={v}' for k, v in event_dict.items()])
+                events.append(event_str)
+        
+        elif file_ext == 'txt':
+            format_detected = "txt"
+            lines = content_str.strip().split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if line:  # Skip empty lines
+                    events.append(line)
+        
+        else:
+            # Try to auto-detect format
+            content_str = content_str.strip()
+            
+            # Try JSON first
+            try:
+                data = json.loads(content_str)
+                format_detected = "json"
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            event_str = ' '.join([f'{k}={v}' for k, v in item.items()])
+                            events.append(event_str)
+                        else:
+                            events.append(str(item))
+            except json.JSONDecodeError:
+                # Fall back to line-by-line (assume txt format)
+                format_detected = "txt"
+                lines = content_str.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line:
+                        events.append(line)
+        
+        if not events:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid events found in file"
+            )
+        
+        return FileUploadResponse(
+            filename=file.filename,
+            total_events=len(events),
+            events=events,
+            format_detected=format_detected,
+            sample_events=events[:5],  # Return first 5 as samples
+            errors=errors
+        )
+    
+    except HTTPException:
+        raise
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="File must be UTF-8 encoded text"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error processing file: {str(e)}"
+        )
 
 
 @app.delete("/job/{job_id}")

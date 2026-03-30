@@ -20,6 +20,7 @@ import { TrainingProgress } from '@/components/training-progress'
 import { ClusterVisualization } from '@/components/cluster-visualization'
 import { ClusterDetails } from '@/components/cluster-details'
 import { SecurityInsights } from '@/components/security-insights'
+import { EventLogUpload } from '@/components/event-log-upload'
 import {
   startTraining,
   getTrainingStatus,
@@ -40,6 +41,8 @@ export default function SecurityClusteringApp() {
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking')
   const [deviceInfo, setDeviceInfo] = useState<string>('')
   const [sampleEvents, setSampleEvents] = useState<string[]>([])
+  const [loadedEvents, setLoadedEvents] = useState<string[]>([])
+  const [uploadedFilename, setUploadedFilename] = useState<string>('')
   const [jobId, setJobId] = useState<string | null>(null)
   const [progress, setProgress] = useState<TrainingProgressType | null>(null)
   const [results, setResults] = useState<AnalysisResponse | null>(null)
@@ -278,7 +281,7 @@ export default function SecurityClusteringApp() {
 
         {/* Configuration State */}
         {state === 'configuring' && (
-          <div className="max-w-2xl mx-auto">
+          <div className="max-w-4xl mx-auto space-y-6">
             <Button
               variant="ghost"
               className="mb-4"
@@ -286,10 +289,22 @@ export default function SecurityClusteringApp() {
             >
               ← Back
             </Button>
+            
+            {/* File Upload Section */}
+            <EventLogUpload 
+              onEventsLoaded={(events, filename) => {
+                setLoadedEvents(events)
+                setUploadedFilename(filename)
+              }}
+            />
+            
+            {/* Training Config */}
             <TrainingConfig
               onSubmit={handleStartTraining}
               isLoading={false}
               sampleEvents={sampleEvents}
+              preloadedEvents={loadedEvents}
+              preloadedFilename={uploadedFilename}
             />
           </div>
         )}

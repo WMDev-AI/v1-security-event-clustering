@@ -53,6 +53,15 @@ export interface ClusterResult {
   representative_events: SecurityEvent[];
 }
 
+export interface FileUploadResponse {
+  filename: string;
+  total_events: number;
+  events: string[];
+  format_detected: string;
+  sample_events: string[];
+  errors: string[];
+}
+
 export interface AnalysisResponse {
   total_events: number;
   n_clusters: number;
@@ -101,6 +110,23 @@ export async function getResults(jobId: string): Promise<AnalysisResponse> {
 export async function getDemoEvents(): Promise<{ sample_events: string[] }> {
   const res = await fetch(`${API_BASE}/demo`);
   if (!res.ok) throw new Error('Failed to get demo events');
+  return res.json();
+}
+
+export async function uploadEventLog(file: File): Promise<FileUploadResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  const res = await fetch(`${API_BASE}/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+  
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'File upload failed');
+  }
+  
   return res.json();
 }
 

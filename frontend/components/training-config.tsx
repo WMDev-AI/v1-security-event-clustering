@@ -35,6 +35,8 @@ interface TrainingConfigProps {
   onSubmit: (config: TrainingRequest) => void
   isLoading: boolean
   sampleEvents: string[]
+  preloadedEvents?: string[]
+  preloadedFilename?: string
 }
 
 const MODEL_INFO = {
@@ -64,8 +66,8 @@ const MODEL_INFO = {
   }
 }
 
-export function TrainingConfig({ onSubmit, isLoading, sampleEvents }: TrainingConfigProps) {
-  const [events, setEvents] = useState<string>(sampleEvents.join('\n'))
+export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEvents, preloadedFilename }: TrainingConfigProps) {
+  const [events, setEvents] = useState<string>(preloadedEvents?.length ? preloadedEvents.join('\n') : sampleEvents.join('\n'))
   const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive'>('idec')
   const [nClusters, setNClusters] = useState(10)
   const [latentDim, setLatentDim] = useState(32)
@@ -103,7 +105,7 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents }: TrainingCo
               Security Events
             </CardTitle>
             <CardDescription>
-              Paste your security events (one per line, key=value format)
+              {preloadedFilename ? `Loaded from: ${preloadedFilename}` : 'Paste your security events (one per line, key=value format)'}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -117,13 +119,15 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents }: TrainingCo
               <span className={eventCount < 100 ? 'text-destructive' : 'text-muted-foreground'}>
                 {eventCount} events {eventCount < 100 && '(minimum 100 required)'}
               </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setEvents(sampleEvents.join('\n'))}
-              >
-                Load Sample Events
-              </Button>
+              {!preloadedFilename && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setEvents(sampleEvents.join('\n'))}
+                >
+                  Load Sample Events
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
