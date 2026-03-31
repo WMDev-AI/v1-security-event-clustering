@@ -178,6 +178,15 @@ This implementation contributes the following engineering-research elements:
 
 ### 4.1 High-Level Data Flow
 
+This high-level data-flow architecture is selected because security clustering is not a single algorithmic step; it is a pipeline that must transform noisy raw logs into reliable analyst outputs. A linear staged flow is preferable here because each stage has a distinct failure mode, quality contribution, and observability requirement.
+
+Advantages of this architecture include:
+
+- **Modularity**: parsing, feature engineering, learning, refinement, and insight generation can be improved independently.
+- **Traceability**: analysts and engineers can inspect where quality degradation occurs (input quality vs model quality vs postprocessing quality).
+- **Reproducibility**: explicit stage boundaries support controlled experiments and ablation studies.
+- **Operational robustness**: failures can be localized to stages without collapsing the entire workflow design.
+
 ```mermaid
 flowchart TD
     A[Raw Security Logs] --> B[Parser]
@@ -214,6 +223,15 @@ This data-flow figure describes how raw security telemetry is transformed into a
 
 ### 4.2 Runtime Component View
 
+This runtime component architecture is selected to separate user interaction, API orchestration, model training, and intelligence generation. In SOC-facing systems, this separation is essential to keep interfaces responsive while expensive training and refinement run in background processes.
+
+Advantages of this architecture include:
+
+- **Scalability**: heavy ML components are isolated from request-handling logic.
+- **Responsiveness**: asynchronous job handling prevents UI/API blocking during long training tasks.
+- **Maintainability**: each runtime component has a clear responsibility and interface contract.
+- **Extensibility**: new model families or insight modules can be added with limited impact on other components.
+
 ```mermaid
 flowchart LR
     U[Frontend] --> API[FastAPI Service]
@@ -239,6 +257,15 @@ This runtime component view explains where each transformation is executed and h
 - **`INSIGHTS: Security Insights Engine`**: maps cluster profiles into higher-level intelligence (risk assessment, attack pattern hints, and correlations).
 
 ### 4.3 Stage Transitions
+
+This stage-transition architecture is selected to explicitly model long-running, multi-phase training behavior as a finite set of states. In production security tooling, users must distinguish between active computation, postprocessing, and error states to avoid false assumptions about hangs or silent failures.
+
+Advantages of this architecture include:
+
+- **Transparent progress semantics**: users can see exactly which computational phase is executing.
+- **Better failure handling**: stage-specific error reporting improves diagnosis and recovery.
+- **Control and governance**: transitions enforce a deterministic training lifecycle.
+- **User trust**: explicit postprocessing state explains delays after fine-tuning and reduces confusion.
 
 ```mermaid
 stateDiagram-v2
