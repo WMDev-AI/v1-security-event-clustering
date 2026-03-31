@@ -16,7 +16,7 @@ export interface TrainingProgress {
   job_id: string;
   status: string;
   progress: number;  // Overall progress 0-100
-  stage?: string;  // "initializing" | "pretraining" | "initialization" | "fine-tuning"
+  stage?: string;  // "initializing" | "pretraining" | "initialization" | "fine-tuning" | "postprocessing"
   stage_progress?: number;  // Progress within current stage 0-100
   current_epoch: number;
   total_epochs: number;
@@ -26,6 +26,12 @@ export interface TrainingProgress {
   metrics: Record<string, unknown> | null;
   message: string;
   stages_completed?: string[];  // e.g., ["pretraining"]
+  refinement?: {
+    applied: boolean;
+    method: string;
+    elapsed_seconds?: number;
+    time_budget_hit?: boolean;
+  };
 }
 
 export interface SecurityEvent {

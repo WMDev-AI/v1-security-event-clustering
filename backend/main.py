@@ -96,7 +96,7 @@ class TrainingProgress(BaseModel):
     job_id: str
     status: str
     progress: float  # Overall progress 0-100
-    stage: str = "initializing"  # "initializing" | "pretraining" | "initialization" | "fine-tuning"
+    stage: str = "initializing"  # "initializing" | "pretraining" | "initialization" | "fine-tuning" | "postprocessing"
     stage_progress: float = 0.0  # Progress within current stage 0-100
     current_epoch: int
     total_epochs: int
@@ -238,10 +238,30 @@ async def run_training(
         
         await trainer.finetune(features, progress_callback=finetune_callback)
         
+        # Refinement stage
+        training_jobs[job_id]["stage"] = "postprocessing"
+        training_jobs[job_id]["message"] = "Refining cluster assignments..."
+        training_jobs[job_id]["stage_total_epochs"] = 0
+        training_jobs[job_id]["stage_epoch"] = 0
+        training_jobs[job_id]["stage_progress"] = 0
+        training_jobs[job_id]["progress"] = 95
+        await asyncio.sleep(0.05)
+
+        async def refine_progress_callback(progress_pct: float):
+            training_jobs[job_id]["stage_progress"] = progress_pct
+            # Postprocessing occupies the final 5% (95 -> 100)
+            training_jobs[job_id]["progress"] = 95 + (progress_pct * 0.05)
+            print(f"[refinement] job={job_id} progress={progress_pct:.1f}% overall={training_jobs[job_id]['progress']:.2f}%")
+            await asyncio.sleep(0.05)
+
         # Get final results
         labels = trainer.predict(features)
         latent = trainer.get_latent_representations(features)
-        labels, refinement_info = trainer.refine_cluster_assignments(latent, labels)
+        labels, refinement_info = await trainer.refine_cluster_assignments(
+            latent,
+            labels,
+            progress_callback=refine_progress_callback
+        )
         probs = trainer.get_cluster_probabilities(features)
         
         # Analyze clusters
@@ -264,6 +284,7 @@ async def run_training(
         
         training_jobs[job_id]["status"] = "completed"
         training_jobs[job_id]["progress"] = 100
+        training_jobs[job_id]["stage_progress"] = 100
         training_jobs[job_id]["message"] = "Training completed successfully"
         training_jobs[job_id]["metrics"] = ClusteringMetrics.compute_all(labels, features=latent)
         training_jobs[job_id]["refinement"] = refinement_info

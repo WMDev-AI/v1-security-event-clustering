@@ -189,6 +189,33 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
               />
             )}
           </div>
+
+          {/* Refinement Stage */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                {progress.status === 'completed' && progress.refinement ? (
+                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                ) : progress.stage === 'postprocessing' ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                ) : (
+                  <div className="h-4 w-4 rounded-full border-2 border-muted" />
+                )}
+                <span className="font-medium">Refining Cluster Assignments</span>
+              </div>
+              {progress.stage === 'postprocessing' && (
+                <span className="text-muted-foreground">
+                  {Math.round(progress.stage_progress || 0)}%
+                </span>
+              )}
+            </div>
+            {progress.stage === 'postprocessing' && (
+              <Progress
+                value={progress.stage_progress || 0}
+                className="h-1.5"
+              />
+            )}
+          </div>
         </div>
 
         {/* Metrics Preview */}

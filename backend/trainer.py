@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from enum import Enum
 import asyncio
 import inspect
+import time
 
 from deep_clustering import (
     DeepEmbeddedClustering,
@@ -595,12 +596,15 @@ class DeepClusteringTrainer:
         
         return ClusteringMetrics.compute_all(labels_pred, labels_true, latent)
 
-    def refine_cluster_assignments(
+    async def refine_cluster_assignments(
         self,
         latent: np.ndarray,
         initial_labels: np.ndarray,
         n_trials: int = 8,
-        min_gain: float = 0.01
+        min_gain: float = 0.01,
+        max_search_seconds: float = 8.0,
+        silhouette_sample_size: int = 1500,
+        progress_callback: Optional[Callable[[float], Awaitable[None]]] = None,
     ) -> tuple[np.ndarray, dict]:
         """
         Refine cluster assignments in latent space using multiple K-Means restarts.
@@ -612,6 +616,8 @@ class DeepClusteringTrainer:
             "silhouette_before": -1.0,
             "silhouette_after": -1.0,
             "silhouette_gain": 0.0,
+            "elapsed_seconds": 0.0,
+            "time_budget_hit": False,
         }
 
         if latent is None or len(latent) < 3:
@@ -621,74 +627,130 @@ class DeepClusteringTrainer:
         if len(unique_labels) < 2:
             return initial_labels, result
 
+        start_time = time.perf_counter()
+
+        def is_timeout() -> bool:
+            return (time.perf_counter() - start_time) >= max_search_seconds
+
+        async def report_progress(pct: float) -> None:
+            if progress_callback:
+                try:
+                    value = float(max(0.0, min(100.0, pct)))
+                    maybe_awaitable = progress_callback(value)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+                except Exception:
+                    pass
+
+        def score_partition(features: np.ndarray, labels: np.ndarray) -> float:
+            """Fast silhouette scoring with adaptive sampling under time budget."""
+            if len(np.unique(labels)) < 2:
+                return -1.0
+            try:
+                n = len(labels)
+                if n > silhouette_sample_size:
+                    return float(
+                        silhouette_score(
+                            features,
+                            labels,
+                            sample_size=silhouette_sample_size,
+                            random_state=42,
+                        )
+                    )
+                return float(silhouette_score(features, labels))
+            except Exception:
+                return -1.0
+
         # Normalize latent space for metric stability and K-Means distance quality.
         latent_scaled = latent.astype(np.float32, copy=False)
         latent_scaled = (latent_scaled - latent_scaled.mean(axis=0)) / (latent_scaled.std(axis=0) + 1e-8)
 
-        try:
-            base_score = float(silhouette_score(latent_scaled, initial_labels))
-        except Exception:
-            base_score = -1.0
+        base_score = score_partition(latent_scaled, initial_labels)
 
         best_labels = initial_labels
         best_score = base_score
         n_clusters = len(unique_labels)
 
-        for trial in range(max(1, n_trials)):
+        # Tighten search to stay within 5-10s budget.
+        kmeans_trials = max(1, min(4, n_trials))
+        gmm_trials = max(1, min(2, n_trials // 2))
+        total_steps = kmeans_trials + gmm_trials + (1 if len(latent_scaled) <= 3500 else 0)
+        completed_steps = 0
+        await report_progress(5.0)
+
+        for trial in range(kmeans_trials):
+            if is_timeout():
+                result["time_budget_hit"] = True
+                break
             try:
                 kmeans = KMeans(
                     n_clusters=n_clusters,
                     n_init=1,
                     random_state=42 + trial,
-                    max_iter=500
+                    max_iter=150
                 )
                 candidate_labels = kmeans.fit_predict(latent_scaled)
 
                 if len(np.unique(candidate_labels)) < 2:
                     continue
 
-                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
+                candidate_score = score_partition(latent_scaled, candidate_labels)
                 if candidate_score > best_score:
                     best_score = candidate_score
                     best_labels = candidate_labels
             except Exception:
                 continue
+            finally:
+                completed_steps += 1
+                await report_progress(5.0 + 90.0 * (completed_steps / max(1, total_steps)))
 
         # Gaussian Mixture candidates in latent space.
-        for trial in range(max(1, n_trials // 2)):
+        for trial in range(gmm_trials):
+            if is_timeout():
+                result["time_budget_hit"] = True
+                break
             try:
                 gmm = GaussianMixture(
                     n_components=n_clusters,
                     covariance_type="full",
                     reg_covar=1e-5,
-                    max_iter=300,
+                    max_iter=120,
                     random_state=101 + trial,
                 )
                 candidate_labels = gmm.fit_predict(latent_scaled)
                 if len(np.unique(candidate_labels)) < 2:
                     continue
-                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
+                candidate_score = score_partition(latent_scaled, candidate_labels)
                 if candidate_score > best_score:
                     best_score = candidate_score
                     best_labels = candidate_labels
             except Exception:
                 continue
+            finally:
+                completed_steps += 1
+                await report_progress(5.0 + 90.0 * (completed_steps / max(1, total_steps)))
 
-        # Agglomerative candidate for better non-spherical clusters.
-        try:
-            agg = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
-            candidate_labels = agg.fit_predict(latent_scaled)
-            if len(np.unique(candidate_labels)) > 1:
-                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
-                if candidate_score > best_score:
-                    best_score = candidate_score
-                    best_labels = candidate_labels
-        except Exception:
-            pass
+        # Agglomerative can be expensive; only run on moderate N and if budget allows.
+        if not is_timeout() and len(latent_scaled) <= 3500:
+            try:
+                agg = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
+                candidate_labels = agg.fit_predict(latent_scaled)
+                if len(np.unique(candidate_labels)) > 1:
+                    candidate_score = score_partition(latent_scaled, candidate_labels)
+                    if candidate_score > best_score:
+                        best_score = candidate_score
+                        best_labels = candidate_labels
+            except Exception:
+                pass
+            finally:
+                completed_steps += 1
+                await report_progress(5.0 + 90.0 * (completed_steps / max(1, total_steps)))
 
         result["silhouette_before"] = base_score
         result["silhouette_after"] = best_score
         result["silhouette_gain"] = float(best_score - base_score)
+        result["elapsed_seconds"] = float(time.perf_counter() - start_time)
+        await report_progress(100.0)
 
         if result["silhouette_gain"] >= min_gain:
             result["applied"] = True

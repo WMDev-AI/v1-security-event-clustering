@@ -4,6 +4,7 @@ Handles key=value format events from various security subsystems with subsystem-
 """
 import re
 import numpy as np
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 from datetime import datetime
@@ -226,6 +227,22 @@ class EventParser:
         'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0,
         'emergency': 4, 'alert': 4, 'error': 3, 'warning': 2, 'notice': 1, 'debug': 0
     }
+
+    # Content keyword groups for semantic threat signal extraction
+    CONTENT_KEYWORD_GROUPS = [
+        # Auth and credential abuse
+        ['brute', 'password', 'credential', 'login', 'authentication', 'failed login', 'account lockout'],
+        # Malware and payload execution
+        ['malware', 'trojan', 'ransomware', 'shellcode', 'payload', 'dropper', 'virus'],
+        # Reconnaissance and scanning
+        ['scan', 'probe', 'recon', 'enumeration', 'port sweep', 'discovery'],
+        # Exfiltration / data movement
+        ['exfiltration', 'data leak', 'data transfer', 'download', 'upload', 'staging'],
+        # Web attack patterns
+        ['sql injection', 'xss', 'csrf', 'directory traversal', 'command injection', 'owasp'],
+        # C2 / persistence / lateral movement hints
+        ['beacon', 'command and control', 'c2', 'persistence', 'lateral movement', 'privilege escalation'],
+    ]
     
     def __init__(self):
         # Regex for parsing key=value pairs (handles quoted values)
@@ -403,6 +420,14 @@ class EventParser:
             return True
         except ValueError:
             return False
+
+    def _stable_hash_to_unit(self, value: str, modulo: int = 4096) -> float:
+        """Deterministic hash to [0, 1] for stable categorical projection."""
+        if not value:
+            return 0.0
+        digest = hashlib.md5(value.encode('utf-8', errors='ignore')).hexdigest()
+        bucket = int(digest, 16) % modulo
+        return float(bucket) / float(modulo - 1)
     
     def parse_events(self, raw_events: list[str]) -> list[SecurityEvent]:
         """Parse multiple raw events"""
@@ -494,14 +519,33 @@ class EventParser:
             else:
                 return [0.0, 0.0, 0.0, 0.0]
             
-            hour_norm = dt.hour / 23.0
+            # Cyclic hour features are more expressive than raw normalized hour.
+            hour_angle = (2.0 * np.pi * dt.hour) / 24.0
+            hour_sin = float(np.sin(hour_angle))
+            hour_cos = float(np.cos(hour_angle))
             day_of_week = dt.weekday() / 6.0
-            is_weekend = 1.0 if dt.weekday() >= 5 else 0.0
             is_business_hours = 1.0 if 9 <= dt.hour <= 17 else 0.0
-            
-            return [hour_norm, day_of_week, is_weekend, is_business_hours]
+
+            return [hour_sin, hour_cos, day_of_week, is_business_hours]
         except Exception:
             return [0.0, 0.0, 0.0, 0.0]
+
+    def content_to_features(self, content: str) -> list[float]:
+        """Extract compact semantic threat features from event content."""
+        if not content:
+            return [0.0] * (len(self.CONTENT_KEYWORD_GROUPS) + 2)
+
+        c = content.lower()
+        token_count = len(c.split())
+        exclamation_density = min(c.count('!') / 5.0, 1.0)
+        keyword_group_hits = []
+
+        for group in self.CONTENT_KEYWORD_GROUPS:
+            hit = 1.0 if any(k in c for k in group) else 0.0
+            keyword_group_hits.append(hit)
+
+        token_feature = min(token_count / 80.0, 1.0)
+        return keyword_group_hits + [token_feature, exclamation_density]
     
     def event_to_features(self, event: SecurityEvent) -> list[float]:
         """Convert a SecurityEvent to a feature vector, including subsystem-specific fields"""
@@ -543,6 +587,9 @@ class EventParser:
         # Content length (normalized)
         content_len = min(len(event.content) / 500.0, 1.0) if event.content else 0.0
         features.append(content_len)
+
+        # Semantic content features (keyword groups + structure hints)
+        features.extend(self.content_to_features(event.content))
         
         # Subsystem-specific features (varies by subsystem)
         subsys_features = self._extract_subsystem_features(event)
@@ -570,7 +617,7 @@ class EventParser:
             
         elif event.subsystem == 'ips':
             # Rule ID hash (converted to feature)
-            rule_hash = float(hash(event.rule_id) % 256) / 255.0 if event.rule_id else 0.0
+            rule_hash = self._stable_hash_to_unit(event.rule_id, modulo=1024)
             features.append(rule_hash)
             # Has rule name
             features.append(1.0 if event.rule_name else 0.0)
@@ -668,7 +715,7 @@ class EventParser:
             features.append(1.0 if event.firewall_zone_to else 0.0)
             # Zone pair encoding (simple hash)
             zone_pair = f"{event.firewall_zone_from}-{event.firewall_zone_to}"
-            zone_hash = float(hash(zone_pair) % 256) / 255.0 if zone_pair != "-" else 0.0
+            zone_hash = self._stable_hash_to_unit(zone_pair, modulo=1024) if zone_pair != "-" else 0.0
             features.append(zone_hash)
         
         # Pad all subsystem features to exactly 12 dimensions for consistency
@@ -684,10 +731,10 @@ class EventParser:
     
     def get_feature_dim(self) -> int:
         """Return the dimension of feature vectors"""
-        # Base: 5+5+8+15+4+1+4+6+1+1 = 50
-        # Subsystem-specific: varies, estimate max ~12 per subsystem
-        # Total: ~62
-        return 62
+        # Base: 5+5+8+15+4+1+4+6+1+1 + (6 keyword groups + 2 content structure) = 58
+        # Subsystem-specific: fixed to 12
+        # Total: 70
+        return 70
 
 
 # Example usage and testing
