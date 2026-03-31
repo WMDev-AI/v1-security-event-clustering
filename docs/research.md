@@ -195,12 +195,22 @@ flowchart TD
     M --> N[Security Insights and Recommendations]
 ```
 
-This pipeline describes how raw, heterogeneous security telemetry is transformed into analyst-facing cluster entities. Key design choices include:
+This data-flow figure describes how raw security telemetry is transformed into analyst-ready cluster intelligence. Each labeled block corresponds to a distinct transformation step:
 
-- **Separation of concerns**: parsing/feature extraction produces a stable numeric representation, while representation learning and clustering operate in the latent space.
-- **Two-stage clustering**: an initial clustering process provides seeds for deep objectives, and a post-fine-tuning latent refinement step can correct assignments under intrinsic criteria.
-- **Metric consistency**: intrinsic metrics are computed from the same latent embeddings that drive clustering, making quality scores comparable across runs and API endpoints.
-- **Threat-centric output**: clustering labels are not treated as the final deliverable; they are used to build semantic cluster profiles and derive threat insights for SOC workflows.
+- **`A: Raw Security Logs`**: source event strings collected from security tooling (firewalls, IDS/IPS, WAF, authentication, etc.).
+- **`B: Parser`**: parses raw strings into structured event fields (timestamp, src/dst, subsystem, action, severity, and content-derived signals when available).
+- **`C: Feature Extraction`**: converts parsed event fields into a fixed-length numeric vector per event, capturing semantics relevant to clustering.
+- **`D: Normalization`**: standardizes each feature dimension using dataset mean and variance so that distance computations in later steps are stable and comparable.
+- **`E: Deep Representation Learning`**: the encoder part of the selected deep clustering model maps normalized features into a latent embedding space where cluster geometry is more separable.
+- **`F: Cluster Initialization`**: produces initial cluster seeds/assignments (e.g., via GMM/K-means in latent space or model-specific initialization) to prevent degenerate clustering updates.
+- **`G: Deep Fine-tuning`**: optimizes the clustering-aware objective (DEC/IDEC/VaDE/contrastive) to refine both latent geometry and soft assignment structure.
+- **`H: Latent Embeddings Z`**: stores the learned embedding vectors $z_i=f_\theta(x_i)$ for all events, which are the basis for final clustering and metrics.
+- **`I: Base Assignments`**: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities).
+- **`J: Latent Ensemble Refinement`**: performs a bounded search over alternative latent partitions (algorithm choice, cluster-count candidates, and projection variants) to improve intrinsic quality.
+- **`K: Final Labels`**: selects the refined labels and treats them as the canonical clustering result for downstream profiling.
+- **`L: Intrinsic Metrics`**: computes Silhouette, Davies–Bouldin, and Calinski–Harabasz from the same latent representation used for clustering, enabling consistent quality reporting.
+- **`M: Cluster Profiling`**: aggregates per-event information under each label to produce cluster summaries such as dominant subsystems/actions and representative events.
+- **`N: Security Insights and Recommendations`**: converts cluster profiles into analyst-facing intelligence (threat indicators, priority/risk assessment, and recommended actions).
 
 ### 4.2 Runtime Component View
 
@@ -217,14 +227,16 @@ flowchart LR
     INSIGHTS --> U
 ```
 
-The runtime view emphasizes where computation and data transformation occur:
+This runtime component view explains where each transformation is executed and how data moves between runtime services:
 
-- The **Frontend** submits a training job and polls job state; it never directly performs heavy ML computations.
-- The **FastAPI Service** manages job metadata, runs training in background, and ensures the HTTP layer remains responsive.
-- The **DeepClusteringTrainer** wraps representation learning and clustering objectives, producing final latent embeddings and base cluster assignments.
-- The **Latent Refinement Engine** performs post-training search over candidate partitions using intrinsic metrics, improving quality without changing the learned encoder weights.
-- The **Cluster Analyzer** aggregates point-level predictions into cluster-level profiles (dominant subsystems/actions, representative events, size statistics).
-- The **Security Insights Engine** converts cluster profiles into SOC-style intelligence (threat indicators, recommended actions, and correlations across clusters).
+- **`U: Frontend`**: controls the user workflow (start training, poll progress, fetch results) and renders cluster metrics and insights.
+- **`API: FastAPI Service`**: exposes HTTP endpoints (train, status, results, cluster events, insights) and coordinates background training so the UI thread stays responsive.
+- **`PARSER: Event Parser`**: reused by the API to parse raw strings into structured events and then to produce normalized feature matrices for training.
+- **`TRAINER: DeepClusteringTrainer`**: encapsulates model training logic, including pretraining, initialization, fine-tuning, and inference of latent embeddings and soft assignments.
+- **`MODELS: DEC / IDEC / VaDE / Contrastive`**: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented.
+- **`REFINE: Latent Refinement Engine`**: post-processes model output using intrinsic metrics by exploring candidate partitions under time and validity constraints.
+- **`ANALYZER: Cluster Analyzer`**: consumes refined labels and events to compute cluster-level profiles (representative events, top entities, severity distributions, etc.).
+- **`INSIGHTS: Security Insights Engine`**: maps cluster profiles into higher-level intelligence (risk assessment, attack pattern hints, and correlations).
 
 ### 4.3 Stage Transitions
 
@@ -243,15 +255,17 @@ stateDiagram-v2
     postprocessing --> failed
 ```
 
-Stage transitions make compute-time behavior explicit, which is critical in security analytics where users expect deterministic progress semantics. In this pipeline:
+Stage transitions make the end-to-end compute schedule explicit. This is especially important for security analytics UX, because the UI needs to distinguish model convergence from expensive bounded post-processing. Each stage corresponds to a specific technical operation:
 
-- `parsing`: converts raw log strings into typed event objects and a numeric feature matrix; failures here typically indicate malformed input or unsupported schema.
-- `pretraining`: learns a smooth latent representation by reconstruction (DEC/IDEC/VaDE) or representation consistency (contrastive); this reduces sensitivity to initialization.
-- `initialization`: derives initial cluster seeds in latent space (e.g., GMM/K-means or model-specific initialization); deep clustering objectives are sensitive to these seeds.
-- `fine_tuning`: optimizes the clustering objective while monitoring assignment drift and intrinsic metrics; early stopping can occur when label assignments stabilize.
-- `postprocessing`: refines the final partition by latent ensemble search with guardrails (time budget and cluster-size constraints), improving intrinsic metric values and cluster interpretability.
+- **`parsing`**: converts raw event strings into structured events and a normalized feature matrix; errors here typically reflect schema problems or unsupported input formats.
+- **`pretraining`**: learns an embedding manifold that supports clustering by reconstruction (DEC/IDEC/VaDE) or contrastive invariance (contrastive).
+- **`initialization`**: establishes initial cluster assignments/seeds in latent space; deep clustering objectives are sensitive to this step, and poor seeds can lead to collapse-like solutions.
+- **`fine_tuning`**: optimizes the selected deep clustering objective while periodically updating assignments/targets and monitoring intrinsic metrics and assignment drift.
+- **`postprocessing`**: refines the final discrete partition via latent ensemble search (varying algorithm type, candidate cluster counts, and latent projections) under a strict runtime budget and validity constraints (e.g., minimum cluster size).
+- **`completed`**: the API can safely return final results (labels, intrinsic metrics, latent visualization, and cluster profiles).
+- **`failed`**: any unrecoverable error in the corresponding stage triggers this terminal state, allowing the UI to surface a diagnostic message rather than waiting indefinitely.
 
-If the system reports `fine_tuning complete` but the job has not reached `completed`, it is usually performing this bounded `postprocessing` optimization rather than being stuck.
+If you observe logs such as `Fine-tuning complete!` without a rapid `completed`, it typically indicates the system is still in `postprocessing` (bounded refinement), not that training is stuck.
 
 ---
 
