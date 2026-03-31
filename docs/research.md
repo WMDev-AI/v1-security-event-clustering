@@ -10,9 +10,10 @@ This document presents a research-oriented, technical description of the deep cl
 
 Let a corpus of parsed security events be represented as:
 
-\[
+```math
 \mathcal{D} = \{x_i\}_{i=1}^{N}, \quad x_i \in \mathbb{R}^{d}
-\]
+```
+
 
 where each \(x_i\) is a normalized feature vector extracted from raw logs (timestamps, network fields, subsystem, action, severity, content-derived indicators, etc.).
 
@@ -21,9 +22,9 @@ The objective is to learn:
 1. A latent mapping \(f_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{m}\), \(m \ll d\), and  
 2. A cluster assignment function \(g\) that partitions latent points:
 
-\[
+```math
 z_i = f_\theta(x_i), \quad y_i = g(z_i), \quad y_i \in \{1,\dots,K\}
-\]
+```
 
 such that intra-cluster compactness is maximized and inter-cluster separation is maximized.
 
@@ -52,9 +53,9 @@ flowchart TD
 
 For each feature dimension \(j\), standardization is applied:
 
-\[
+```math
 \tilde{x}_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j + \epsilon}
-\]
+```
 
 where \(\mu_j\) and \(\sigma_j\) are empirical mean and standard deviation over the training set, and \(\epsilon\) is a small constant for numerical stability.
 
@@ -68,34 +69,34 @@ DEC learns cluster-oriented latent representations by minimizing KL divergence b
 
 Student-t soft assignment:
 
-\[
+```math
 q_{ij} = \frac{\left(1 + \frac{\|z_i-\mu_j\|^2}{\alpha}\right)^{-\frac{\alpha+1}{2}}}
 {\sum_{j'}\left(1 + \frac{\|z_i-\mu_{j'}\|^2}{\alpha}\right)^{-\frac{\alpha+1}{2}}}
-\]
+```
 
 Target distribution:
 
-\[
+```math
 p_{ij} = \frac{q_{ij}^2 / f_j}{\sum_{j'} q_{ij'}^2 / f_{j'}}, \quad f_j = \sum_i q_{ij}
-\]
+```
 
 Loss:
 
-\[
+```math
 \mathcal{L}_{DEC} = \mathrm{KL}(P\|Q) = \sum_i \sum_j p_{ij}\log\frac{p_{ij}}{q_{ij}}
-\]
+```
 
 ### 4.2 Improved DEC (IDEC)
 
 IDEC augments DEC with reconstruction preservation:
 
-\[
+```math
 \mathcal{L}_{IDEC} = \mathcal{L}_{DEC} + \gamma \cdot \mathcal{L}_{rec}
-\]
+```
 
-\[
+```math
 \mathcal{L}_{rec} = \frac{1}{N}\sum_{i=1}^{N}\|x_i-\hat{x}_i\|_2^2
-\]
+```
 
 where \(\gamma\) controls the reconstruction regularization strength.
 
@@ -103,15 +104,15 @@ where \(\gamma\) controls the reconstruction regularization strength.
 
 VaDE combines VAE inference with Gaussian mixture priors in latent space:
 
-\[
+```math
 p(z) = \sum_{k=1}^{K}\pi_k \mathcal{N}(z\mid \mu_k, \Sigma_k)
-\]
+```
 
 The training objective maximizes ELBO:
 
-\[
+```math
 \mathcal{L}_{VaDE} = \mathbb{E}_{q(z,c|x)}[\log p(x,z,c)-\log q(z,c|x)]
-\]
+```
 
 which can be interpreted as reconstruction fidelity plus regularized latent mixture alignment.
 
@@ -121,17 +122,17 @@ Two stochastic views \(x_i^{(1)}, x_i^{(2)}\) are produced by feature dropout. E
 
 For similarity \(s(u,v)\) and temperature \(\tau\), InfoNCE-style term:
 
-\[
+```math
 \mathcal{L}_{con} = -\sum_i \log
 \frac{\exp(s(h_i^{(1)},h_i^{(2)})/\tau)}
 {\sum_{k}\exp(s(h_i^{(1)},h_k^{(2)})/\tau)}
-\]
+```
 
 Total objective:
 
-\[
+```math
 \mathcal{L}_{total} = \mathcal{L}_{con} + \lambda_{cons}\mathcal{L}_{cons} + \lambda_{ent}\mathcal{L}_{ent}
-\]
+```
 
 where \(\mathcal{L}_{cons}\) enforces view-consistent assignments and \(\mathcal{L}_{ent}\) avoids degenerate low-entropy collapse.
 
@@ -171,34 +172,34 @@ sequenceDiagram
 
 ### 6.1 Silhouette Score
 
-\[
+```math
 s(i)=\frac{b(i)-a(i)}{\max\{a(i),b(i)\}}
-\]
+```
 
 where \(a(i)\) is mean intra-cluster distance and \(b(i)\) is mean nearest-cluster distance. Global score:
 
-\[
+```math
 S=\frac{1}{N}\sum_i s(i), \quad S\in[-1,1]
-\]
+```
 
 Higher is better.
 
 ### 6.2 Davies-Bouldin Index (DBI)
 
-\[
+```math
 \mathrm{DBI}=\frac{1}{K}\sum_{i=1}^{K}\max_{j\neq i}
 \frac{\sigma_i+\sigma_j}{d(c_i,c_j)}
-\]
+```
 
 where \(\sigma_i\) is average within-cluster scatter and \(d(c_i,c_j)\) is centroid distance. Lower is better.
 
 ### 6.3 Calinski-Harabasz Score (CH)
 
-\[
+```math
 \mathrm{CH}=
 \frac{\mathrm{Tr}(B_K)/(K-1)}
 {\mathrm{Tr}(W_K)/(N-K)}
-\]
+```
 
 where \(B_K\) is between-cluster dispersion and \(W_K\) is within-cluster dispersion. Higher is better.
 
@@ -215,15 +216,15 @@ After deep model inference, labels are refined by searching over:
 
 Best partition selection:
 
-\[
+```math
 y^*=\arg\max_{y \in \mathcal{C}} \ \mathrm{Silhouette}(Z, y)
-\]
+```
 
 with acceptance criterion:
 
-\[
+```math
 \Delta S = S(y^*) - S(y_0) \ge \delta
-\]
+```
 
 where \(y_0\) is model-predicted labels and \(\delta\) is a minimum gain threshold.
 
@@ -250,9 +251,9 @@ Let \(N\) be samples, \(m\) latent dimension, \(K\) clusters.
 
 Total refinement complexity scales with:
 
-\[
+```math
 O\left(\sum_{\text{alg}\in\mathcal{A}} |\mathcal{K}| \cdot |\mathcal{R}_{alg}| \cdot \text{cost}_{alg}\right)
-\]
+```
 
 and is explicitly curtailed by the time budget.
 
