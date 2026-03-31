@@ -20,6 +20,60 @@ Deep clustering addresses these issues by learning latent structures jointly wit
 1. learn robust latent embeddings through deep objectives, and
 2. optimize assignments in latent space using intrinsic metric-driven search.
 
+### 1.1 Related Works
+
+Research on unsupervised security analytics spans three major lines: classical clustering, deep clustering, and domain-specific security log mining.
+
+#### Classical Clustering and Representation Limits
+
+Earlier operational pipelines frequently rely on K-means, hierarchical clustering, DBSCAN, or Gaussian mixtures over hand-engineered event vectors. These approaches are computationally attractive and interpretable, but they assume geometry that may not hold for mixed security telemetry:
+
+- K-means favors spherical, equal-variance clusters under Euclidean distance.
+- GMM can model softer boundaries but may still be sensitive to feature scaling and initialization.
+- Hierarchical methods capture nested structure but can become expensive at scale.
+- Density-based methods handle arbitrary shapes but often struggle with variable density and high-dimensional sparse features.
+
+In SOC data, where event semantics are heterogeneous and sparse, feature engineering quality strongly determines outcome quality, creating a ceiling for shallow clustering performance.
+
+#### Deep Clustering Literature
+
+Deep clustering emerged to jointly learn representation and partition structure. A common paradigm is:
+
+1. train an autoencoder (or representation backbone),
+2. initialize clusters in latent space,
+3. optimize a clustering-aligned objective.
+
+Representative families include:
+
+- **DEC-style methods**: use KL-based target distribution refinement to sharpen assignments.
+- **IDEC-style methods**: preserve reconstruction during clustering updates to reduce latent drift.
+- **VaDE-style methods**: combine latent generative modeling with mixture priors for probabilistic assignments.
+- **Contrastive/self-supervised clustering**: enforce invariance across augmentations and improve robustness under noisy inputs.
+
+The major lesson from these works is that representation quality and assignment quality must be optimized together, but no single objective is universally dominant across datasets.
+
+#### Security Event Clustering and Threat Intelligence
+
+Security-focused studies often cluster alerts/logs for:
+
+- alert reduction and deduplication,
+- campaign discovery,
+- anomaly triage,
+- IOC grouping and correlation analysis.
+
+Many practical systems still use static features with shallow clustering, then apply rule-based enrichment. This can help operationally but may fail when novel attack patterns alter feature distributions. More recent works suggest combining latent learning with post-clustering semantics extraction (e.g., subsystem/action trends, source-target behavior, severity context), which aligns with SOC analyst workflows.
+
+#### Positioning of This Work
+
+Relative to prior lines, this implementation combines:
+
+- deep latent learning (multiple model families),
+- intrinsic metric-aware selection and monitoring,
+- bounded ensemble refinement after fine-tuning,
+- direct integration with security insight generation.
+
+In other words, it bridges research-grade clustering quality optimization with production-grade API and analyst-facing outputs.
+
 ---
 
 ## 2. Problem Statement
