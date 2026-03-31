@@ -298,11 +298,58 @@ If you observe logs such as `Fine-tuning complete!` without a rapid `completed`,
 
 ## 5. Data Representation and Preprocessing
 
-### 5.1 Structured Event Vectorization
+### 5.1 Design Goals for Representation
 
-Raw events are parsed into typed fields (network tuple, subsystem/action semantics, severity, content tokens, etc.) and converted into fixed-dimensional vectors.
+The representation layer is designed for a security-first objective: preserve attack-relevant structure while reducing noise and schema variance across telemetry sources. In practice, this means balancing:
 
-### 5.2 Normalization
+- **Discriminability**: features should separate behavior regimes (benign baseline, policy violations, reconnaissance, exploitation, and post-compromise traces) so latent clusters encode security-relevant distinctions.
+- **Robustness**: representation must remain stable when logs are noisy, partially missing, or inconsistently formatted across devices and vendors.
+- **Scalability**: feature construction must support high-throughput SOC ingestion without introducing prohibitive preprocessing latency.
+- **Operational interpretability**: transformed vectors should still map back to understandable event semantics so analysts can validate and act on cluster outputs.
+
+### 5.2 Structured Event Vectorization
+
+Raw events are parsed into typed fields and converted into fixed-length numeric vectors. Typical feature groups include:
+
+- **Network context**: captures communication topology (source/destination patterns, service ports, protocol hints), which is critical for detecting scanning, lateral movement, and exfiltration-like behavior.
+- **Security semantics**: encodes subsystem and action intent (e.g., block/allow/deny/quarantine), preserving the defensive meaning of each event rather than only its raw transport attributes.
+- **Behavioral signals**: includes frequency and recurrence cues that help identify brute-force bursts, beaconing-like repetition, or unusual rate shifts.
+- **Meta fields**: introduces structural and time-derived indicators that support coarse temporal reasoning and event-type differentiation.
+
+Formally, each event is mapped by a parser/featurizer:
+
+```math
+\phi:\ \text{raw event} \rightarrow x_i \in \mathbb{R}^{d}
+```
+
+so the dataset matrix is:
+
+```math
+X = [x_1^\top, x_2^\top, \dots, x_N^\top] \in \mathbb{R}^{N \times d}
+```
+
+### 5.3 Feature Typing and Encoding Strategy
+
+To make heterogeneous logs compatible with deep models, fields are encoded by type:
+
+- **Continuous numeric fields**: used as magnitude-bearing features after scale control; heavy-tailed values can be transformed to reduce domination by extreme observations.
+- **Ordinal fields**: mapped to ordered numeric levels only when domain ordering is semantically valid (for example, graded severity scales).
+- **Categorical fields**: encoded to preserve discrete security semantics; encoding choice is constrained by cardinality, memory budget, and model input compatibility.
+- **Text-like content markers**: converted into compact indicator signals (keyword/category flags) to retain high-value threat cues without introducing heavyweight NLP dependencies.
+
+This typed encoding is critical in security data because categorical semantics (subsystem/action) often carry stronger attack signal than raw magnitudes.
+
+### 5.4 Missing Values and Schema Drift
+
+Security telemetry frequently has incomplete or source-specific fields. Representation must remain stable when attributes are absent. The preprocessing layer therefore treats missingness as first-class:
+
+- **Missing-to-neutral mapping**: absent values are mapped to safe defaults so vectors remain numerically valid and model inputs remain shape-consistent.
+- **Schema-compatible dimensionality**: subsystem-specific missing fields do not alter feature dimensionality, preventing training/inference mismatch across mixed log sources.
+- **Early parser isolation**: malformed records are handled during `parsing`, which prevents silent contamination of downstream clustering statistics.
+
+This design improves resilience under vendor schema changes and mixed data-source ingestion.
+
+### 5.5 Normalization and Scale Control
 
 Per-feature standardization:
 
@@ -310,32 +357,109 @@ Per-feature standardization:
 \tilde{x}_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j + \epsilon}
 ```
 
-where $\mu_j$ and $\sigma_j$ are dataset statistics and $\epsilon$ prevents divide-by-zero.
+where $\mu_j$ and $\sigma_j$ are empirical training statistics and $\epsilon$ avoids division instability.
 
-### 5.3 Why Normalization Matters
+Normalized data matrix:
 
-- stabilizes gradient scales during autoencoder pretraining,
-- reduces dominance of high-magnitude numeric fields,
-- improves distance comparability in latent-space clustering.
+```math
+\tilde{X} = [\tilde{x}_1^\top,\dots,\tilde{x}_N^\top]
+```
 
-### 5.4 Noise and Sparsity Considerations
+### 5.6 Why Normalization Is Necessary
 
-Security logs often include:
+Normalization is not optional in this setting; it directly affects training dynamics and clustering geometry:
 
-- missing fields,
-- repeated boilerplate,
-- bursty anomalies,
-- mixed periodic and attack-driven behavior.
+- **Gradient stability**: keeps optimization numerically stable during pretraining and fine-tuning by preventing disproportionately large parameter updates.
+- **Distance fairness**: prevents large-scale fields from overwhelming distance-based objectives used in assignment and refinement steps.
+- **Latent comparability**: improves consistency of geometry for downstream K-means, GMM, and agglomerative partitioning in latent space.
+- **Cross-tool harmonization**: reduces unit and scale mismatch across heterogeneous security products, improving joint modeling reliability.
 
-Latent learning mitigates these effects by compressing correlated structure and suppressing irrelevant variance.
+### 5.7 Outliers, Bursts, and Rare Events
+
+In security operations, outliers are ambiguous: some are noise, some are genuine attacks. Preprocessing therefore avoids aggressive outlier removal. Instead, the pipeline prefers:
+
+- **Robust scaling/normalization**: limits undue influence from transient spikes while preserving potentially meaningful deviations.
+- **Latent compression**: encourages the model to retain shared structure and suppress nuisance variance that does not contribute to cluster discrimination.
+- **Contextualized rare-event handling**: keeps rare points for clustering/profile analysis instead of removing them, since low-frequency events may represent early-stage attacks.
+
+This is important because deleting rare points can remove early indicators of targeted attacks.
+
+### 5.8 Temporal and Session Context
+
+Although the current representation is primarily event-centric, timestamp information can still contribute through engineered temporal features (time windows, burst markers, periodicity hints). This supports partial reconstruction of campaign dynamics even without full sequence modeling.
+
+Future extensions can move from event-wise vectors to sequence/session representations for richer temporal threat behavior.
+
+### 5.9 Noise and Sparsity Characteristics
+
+Security logs commonly exhibit:
+
+- **Missing fields**: incomplete records from partial logging configurations or parser limitations.
+- **Repeated boilerplate entries**: highly redundant logs that inflate dataset size without proportional information gain.
+- **Bursty anomalies**: short-lived spikes (e.g., scan or brute-force bursts) that can distort naive distribution assumptions.
+- **Mixed periodic and attack-driven regimes**: coexistence of routine cyclical traffic and adversarial behavior, producing multimodal and time-varying distributions.
+
+Deep latent learning mitigates these effects by compressing correlated structure, smoothing local noise, and emphasizing dimensions that support clustering objectives.
+
+### 5.10 Preprocessing Quality Controls
+
+For reliable downstream clustering, preprocessing should be audited with:
+
+- **Feature distribution audits**: compare pre/post-normalization distributions to detect saturation, collapse, or unintended scaling artifacts.
+- **Missingness monitoring**: track per-field and per-source missing rates to identify telemetry degradation and schema drift early.
+- **Parser reliability metrics**: maintain error/rejection counters to quantify ingestion quality and prevent hidden data-quality regressions.
+- **Temporal drift checks**: evaluate batch/window shifts to detect non-stationarity that may require retraining or feature reconfiguration.
+
+These controls are essential because representation quality strongly bounds achievable cluster quality, regardless of model sophistication.
 
 ---
 
 ## 6. Model Families
 
+In this document, a **model family** means a class of deep clustering methods that share the same core training idea and objective function. We consider model families because no single clustering objective works best for every security dataset. Different SOC environments have different properties (noise level, class imbalance, behavior overlap, and compute constraints), so model selection is a practical and scientific decision rather than a fixed default.
+
+It is helpful to think of model families as different "ways to teach the latent space what a good cluster looks like":
+
+- some methods strongly force cluster separation,
+- some methods preserve reconstruction fidelity while clustering,
+- some methods add probabilistic uncertainty modeling,
+- some methods learn invariances through augmentation consistency.
+
+Choosing among these families is important because the choice directly affects:
+
+- **Cluster compactness/separation**: this describes how tight each cluster is internally and how far clusters are from each other; in practice it is evaluated using intrinsic metrics such as Silhouette (higher is better), Davies-Bouldin Index (lower is better), and Calinski-Harabasz (higher is better). Better compactness/separation usually leads to cleaner threat groupings and less mixing between benign and suspicious behaviors.
+  ```math
+  S=\frac{1}{N}\sum_{i=1}^{N}\frac{b(i)-a(i)}{\max\{a(i),b(i)\}},\quad
+  \mathrm{DBI}=\frac{1}{K}\sum_{i=1}^{K}\max_{j\neq i}\frac{\sigma_i+\sigma_j}{d(c_i,c_j)}
+  ```
+- **Stability across runs**: this captures whether repeated training with different random seeds (or minor data perturbations) produces similar assignments; it can be assessed by comparing run-to-run label agreement (for example ARI/NMI) and assignment drift. High stability improves trust and reproducibility, while low stability makes operational playbooks harder to maintain.
+  ```math
+  \text{Stability} \approx \frac{1}{|\mathcal{P}|}\sum_{(r,s)\in\mathcal{P}}\mathrm{ARI}\!\left(y^{(r)},y^{(s)}\right),\quad
+  \Delta_t=\frac{1}{N}\sum_{i=1}^{N}\mathbf{1}[y_i^{(t)}\neq y_i^{(t-1)}]
+  ```
+- **Interpretability for analysts**: this is the degree to which a cluster can be explained in security terms (dominant subsystem/action, representative events, coherent indicators, and clear recommended actions); it is assessed through profile coherence and analyst usability of cluster summaries. High interpretability reduces triage time and improves incident decision quality.
+  ```math
+  H_c=-\sum_{u}p(u\mid c)\log p(u\mid c),\quad
+  \text{Coherence}(c)=1-\frac{H_c}{\log |U|}
+  ```
+- **Training time and operational cost**: this includes wall-clock duration and compute/memory usage across pretraining, fine-tuning, and postprocessing; it is measured per stage and end-to-end. Lower cost enables faster retraining cycles and better production responsiveness, while higher cost may improve quality but can violate SOC latency constraints if not bounded.
+  ```math
+  T_{\text{total}}=T_{\text{parse}}+T_{\text{pretrain}}+T_{\text{init}}+T_{\text{finetune}}+T_{\text{post}},\quad
+  C=\lambda_t T_{\text{total}}+\lambda_m M_{\text{peak}}+\lambda_g G_{\text{gpu-hours}}
+  ```
+
 ## 6.1 Deep Embedded Clustering (DEC)
 
-DEC refines latent space by minimizing divergence between soft assignments and sharpened targets.
+### Beginner intuition
+
+DEC starts from an encoder that maps events into latent vectors, then repeatedly sharpens cluster assignments so points move toward more confident cluster centers.
+
+### How DEC works (step-by-step)
+
+1. Encode each input into latent space.
+2. Compute soft assignment probabilities to cluster centers.
+3. Build a sharpened target distribution that emphasizes high-confidence assignments.
+4. Minimize KL divergence between current assignments and target assignments.
 
 Soft assignment:
 
@@ -356,12 +480,23 @@ Loss:
 \mathcal{L}_{DEC} = \mathrm{KL}(P\|Q)=\sum_i\sum_j p_{ij}\log\frac{p_{ij}}{q_{ij}}
 ```
 
-**Advantages**: directly cluster-focused objective.  
-**Limitations**: risk of representation drift if reconstruction signal is absent.
+### When DEC is useful
+
+- when you want a direct cluster-focused objective,
+- when compute budget is moderate,
+- when fast iteration is preferred.
+
+### Limitations
+
+Because DEC focuses heavily on clustering loss, it can sometimes distort latent structure if reconstruction information is not preserved.
 
 ## 6.2 Improved DEC (IDEC)
 
-IDEC adds reconstruction regularization:
+### Beginner intuition
+
+IDEC is DEC plus a "do not forget the original data structure" term. It tries to improve clusters while preserving what the encoder learned during reconstruction.
+
+### Objective
 
 ```math
 \mathcal{L}_{IDEC}=\mathcal{L}_{DEC}+\gamma\mathcal{L}_{rec}
@@ -371,30 +506,49 @@ IDEC adds reconstruction regularization:
 \mathcal{L}_{rec}=\frac{1}{N}\sum_{i=1}^N \lVert x_i-\hat{x}_i \rVert_2^2
 ```
 
-This balances cluster compactness and information preservation. In operational telemetry, IDEC often yields more stable, interpretable partitions.
+### Why teams often start with IDEC
+
+- tends to be more stable than DEC on noisy telemetry,
+- reduces risk of latent collapse/drift,
+- often yields better interpretability in security cluster profiles.
+
+### Practical trade-off
+
+IDEC is usually slightly slower than DEC because it optimizes two goals at once (clustering + reconstruction), but this trade-off is often worthwhile in SOC data.
 
 ## 6.3 Variational Deep Embedding (VaDE)
 
-VaDE places a Gaussian mixture prior on latent codes:
+### Beginner intuition
+
+VaDE treats latent data as coming from a mixture of Gaussian components, so each cluster is represented probabilistically instead of purely by hard assignment.
+
+Gaussian-mixture prior:
 
 ```math
 p(z)=\sum_{k=1}^K \pi_k\mathcal{N}(z\mid\mu_k,\Sigma_k)
 ```
 
-Optimizes ELBO-style objective:
+ELBO-style objective:
 
 ```math
 \mathcal{L}_{VaDE}=\mathbb{E}_{q(z,c\mid x)}[\log p(x,z,c)-\log q(z,c\mid x)]
 ```
 
-**Advantages**: probabilistic assignments, uncertainty-friendly latent geometry.  
-**Limitations**: higher optimization complexity; sensitive to initialization.
+### Why this matters in security
+
+Security events can be ambiguous (an event may look partly benign and partly suspicious). Probabilistic assignments can model this uncertainty better than purely hard-label approaches.
+
+### Practical trade-off
+
+VaDE can provide richer uncertainty information, but training is more complex and can be sensitive to initialization and hyperparameter settings.
 
 ## 6.4 Contrastive Deep Clustering
 
-Two augmented views of each sample are encoded, and representation consistency is enforced.
+### Beginner intuition
 
-Contrastive term (InfoNCE style):
+Contrastive methods teach the model that two augmented versions of the same event should stay close in representation space, while different events should remain distinguishable.
+
+Contrastive term:
 
 ```math
 \mathcal{L}_{con}
@@ -403,7 +557,7 @@ Contrastive term (InfoNCE style):
 {\sum_k\exp(s(h_i^{(1)},h_k^{(2)})/\tau)}
 ```
 
-Total training objective:
+Total objective:
 
 ```math
 \mathcal{L}_{total}
@@ -412,26 +566,48 @@ Total training objective:
 +\lambda_{ent}\mathcal{L}_{ent}
 ```
 
-**Advantages**: robust under heavy noise/augmentation.  
-**Limitations**: compute-heavy; requires careful augmentation design.
+### Why this can help
 
-## 6.5 Model Selection Guidance
+- stronger robustness to noise and perturbations,
+- useful when raw event quality is inconsistent,
+- often improves representation quality before final clustering.
 
-- **IDEC**: default for balanced quality + stability.
-- **DEC**: simpler/faster when reconstruction fidelity is less critical.
-- **VaDE**: when probabilistic interpretation is required.
-- **Contrastive**: when invariance to perturbation/noise is a priority.
+### Practical trade-off
+
+This family is typically more compute-intensive and depends on well-designed augmentations.
+
+## 6.5 Model Selection Guidance (Beginner-Friendly)
+
+- **IDEC (recommended default)**: best first choice when you want balanced quality, stability, and interpretability.
+- **DEC**: use when you need a simpler/faster cluster-focused baseline.
+- **VaDE**: use when probabilistic membership and uncertainty are important to your analysis.
+- **Contrastive**: use when data noise is high and invariance learning is a priority.
+
+A practical workflow is:
+
+1. start with IDEC,
+2. compare against DEC as a simpler baseline,
+3. try VaDE if ambiguity/uncertainty modeling is needed,
+4. try contrastive models when input noise or variability is severe.
 
 ---
 
 ## 7. Training Strategy
 
+This training strategy is designed to balance three goals that often conflict in security clustering: representation quality, clustering quality, and operational runtime. A single monolithic optimization loop is avoided because security telemetry is noisy and non-stationary; stage-wise training gives better control over failure modes and model behavior.
+
 ### 7.1 Stage-Wise Optimization
 
-1. **Pretraining**: learn stable embedding manifold.
-2. **Initialization**: estimate cluster seeds in latent space.
-3. **Fine-tuning**: optimize clustering-aware objective.
-4. **Postprocessing**: latent ensemble refinement with constraints.
+1. **Pretraining**: learn a stable latent manifold before hard clustering pressure is applied.  
+   In this stage, the model focuses on structure-preserving objectives (reconstruction or contrastive consistency). This reduces sensitivity to noisy features and prevents early collapse into poor local minima.
+2. **Initialization**: estimate cluster seeds in latent space.  
+   Cluster-aware methods are strongly initialization-dependent; this stage computes initial assignments/centers (e.g., K-means/GMM/model-specific initialization) so fine-tuning starts from a plausible partition.
+3. **Fine-tuning**: optimize clustering-aware objective.  
+   The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/VaDE/contrastive), while periodic metrics monitor whether separation improves or degrades.
+4. **Postprocessing**: bounded latent ensemble refinement with constraints.  
+   After model optimization, discrete labels are refined via constrained search in latent space (algorithm and $K$ variants) to recover better intrinsic partitions without retraining encoder weights.
+
+This decomposition improves controllability: each stage answers a different question ("Can we represent events well?", "Do we have sensible seeds?", "Did deep optimization improve clusters?", "Can labels be improved under constraints?").
 
 ### 7.2 Sequence-Level Workflow
 
@@ -455,6 +631,21 @@ sequenceDiagram
     A-->>U: Metrics, clusters, insights
 ```
 
+The sequence workflow can be interpreted as a contract between data handling, model optimization, and analyst-facing outputs:
+
+- **`U -> P: Upload and parse events`**: the user submits raw events; parser validation occurs before expensive training is allowed.
+- **`P -> T: Normalized matrix X`**: trainer receives a fixed-dimensional, normalized matrix to ensure optimization stability.
+- **`T -> T: Pretrain encoder`**: latent manifold is shaped with structure-preserving objectives.
+- **`T -> T: Initialize centers/distribution`**: initial cluster hypotheses are estimated in latent space.
+- **`T -> T: Fine-tune deep objective`**: clustering-aware optimization refines both representation and assignment structure.
+- **`T -> R: Latent Z and labels y0`**: base result is exported to refinement logic.
+- **`R -> R: Bounded ensemble search`**: refinement explores candidate partitions under runtime and validity constraints.
+- **`R -->> T: Refined labels y*`**: best accepted labels are returned to training pipeline.
+- **`T -> A: Events + y* + Z`**: analyzer receives raw event context plus final labels and latent features.
+- **`A -->> U: Metrics, clusters, insights`**: user receives intrinsic quality, cluster details, and threat-oriented summaries.
+
+The main advantage of this explicit sequence is traceability: when output quality is poor, teams can inspect which hop degraded quality (parsing quality, latent learning, initialization, fine-tuning, or refinement).
+
 ### 7.3 Convergence and Monitoring
 
 The trainer monitors periodic intrinsic metrics and assignment drift:
@@ -463,15 +654,47 @@ The trainer monitors periodic intrinsic metrics and assignment drift:
 \Delta_t=\frac{1}{N}\sum_i \mathbf{1}[y_i^{(t)} \ne y_i^{(t-1)}]
 ```
 
-If $\Delta_t$ is below tolerance, fine-tuning can terminate early.
+where $\Delta_t$ measures the fraction of events whose cluster assignment changed between two successive checkpoints.
+
+Monitoring logic typically combines:
+
+- **Assignment stability**: decreasing $\Delta_t$ suggests convergence of partition structure.
+- **Intrinsic trend checks**: Silhouette/DBI/CH trends indicate whether optimization is improving separation or overfitting cluster boundaries.
+- **Loss trend checks**: objective decrease without metric improvement may indicate objective-metric mismatch.
+
+If $\Delta_t$ falls below tolerance and quality metrics stabilize, fine-tuning can terminate early. This prevents unnecessary compute while maintaining cluster quality.
+
+For practical reporting, training snapshots should include:
+
+- current stage and stage progress,
+- latest loss values,
+- latest intrinsic metrics,
+- elapsed time and estimated completion signals.
 
 ### 7.4 Operational Progress Semantics
 
 The API reports stages including `pretraining`, `initialization`, `fine-tuning`, and `postprocessing`, avoiding false perception of hangs during expensive refinement.
 
+Stage-aware progress semantics are critical in production because:
+
+- post-fine-tuning refinement can still be compute-intensive even after training loss has converged,
+- users need to distinguish "model is stuck" from "model is running bounded refinement",
+- operational dashboards need reliable status transitions for automation and alerting.
+
+A recommended interpretation policy is:
+
+- **`fine-tuning`**: model weights and assignment distributions are still being optimized,
+- **`postprocessing`**: model weights are fixed; label refinement and final quality selection are running,
+- **`completed`**: final labels, metrics, and analysis artifacts are ready for retrieval,
+- **`failed`**: stage-specific failure diagnostics should be surfaced to the caller.
+
+This lifecycle model improves user trust, observability, and incident-response readiness in SOC environments.
+
 ---
 
 ## 8. Intrinsic Evaluation Metrics
+
+Intrinsic metrics evaluate clustering quality without requiring ground-truth labels, which is critical in security settings where labels are sparse or delayed. These metrics should be interpreted jointly and alongside analyst utility, because a numerically "good" partition may still be operationally weak if it lacks semantic coherence.
 
 ## 8.1 Silhouette Score
 
@@ -493,6 +716,8 @@ Interpretation:
 - near 0: overlapping boundaries,
 - negative: likely misassignment.
 
+From an operational viewpoint, increasing Silhouette often corresponds to easier triage because cluster boundaries become clearer. However, Silhouette alone can favor overly coarse partitions, so it should be cross-checked with cluster-size distribution and analyst interpretability.
+
 ## 8.2 Davies-Bouldin Index
 
 ```math
@@ -500,6 +725,8 @@ Interpretation:
 ```
 
 Lower is better; high values indicate high within-cluster scatter and weak inter-centroid separation.
+
+In practice, DBI is useful for detecting whether clusters remain too diffuse after fine-tuning. If DBI improves while Silhouette stagnates, the partition may still be becoming operationally cleaner.
 
 ## 8.3 Calinski-Harabasz Score
 
@@ -510,6 +737,8 @@ Lower is better; high values indicate high within-cluster scatter and weak inter
 
 Higher is better; ratio of between-cluster dispersion to within-cluster dispersion.
 
+CH is particularly useful for comparing candidate configurations (different model families or cluster-count choices) because it summarizes global separation efficiency.
+
 ## 8.4 Joint Interpretation
 
 No single metric is sufficient. A practical acceptance region often requires:
@@ -519,6 +748,14 @@ No single metric is sufficient. A practical acceptance region often requires:
 - high or increasing CH,
 - plus cluster-size sanity and analyst relevance.
 
+A composite comparison score may be used for internal ranking:
+
+```math
+\mathcal{Q}_{intrinsic}=w_s S - w_d \mathrm{DBI} + w_c \log(1+\mathrm{CH})
+```
+
+where $w_s,w_d,w_c$ are task-dependent weights. This helps prioritize experiments but should not replace detailed metric diagnostics.
+
 ---
 
 ## 9. Post-Fine-Tuning Latent Ensemble Refinement
@@ -526,6 +763,8 @@ No single metric is sufficient. A practical acceptance region often requires:
 ### 9.1 Motivation
 
 Fine-tuned model labels may be locally optimal but not globally best under intrinsic criteria. Refinement performs bounded search in latent space to recover better partitions.
+
+This stage is especially relevant in security telemetry because latent representation quality and hard assignment quality may diverge. Refinement explicitly targets assignment quality after representation learning has converged.
 
 ### 9.2 Search Space
 
@@ -548,6 +787,14 @@ Adoption criterion:
 
 where $y_0$ is original model prediction and $\delta$ is a minimum gain threshold.
 
+A constrained refinement view:
+
+```math
+y^*=\arg\max_{y\in\mathcal{C}} \mathrm{Silhouette}(Z,y)
+\quad \text{s.t.} \quad
+\min_k |C_k(y)| \ge n_{\min},\ \ T(y)\le T_{max}
+```
+
 ### 9.3 Runtime Guardrails
 
 - search-time cap $T_{max}$,
@@ -556,6 +803,8 @@ where $y_0$ is original model prediction and $\delta$ is a minimum gain threshol
 - immediate return with best-so-far solution when time budget is hit.
 
 These guardrails keep quality improvements practical for production API latency.
+
+The refinement stage therefore behaves as an anytime optimization: when the time budget is reached, the best admissible partition found so far is returned.
 
 ### 9.4 Conceptual Figure
 
@@ -574,6 +823,30 @@ flowchart TD
     F -- No --> H[Keep original labels]
 ```
 
+This figure summarizes the bounded refinement decision process in latent space:
+
+- **`A: Latent Z and labels y0`** is the input from deep fine-tuning, where $Z$ are learned embeddings and $y_0$ are the initial hard assignments.
+- **`B: Generate candidate spaces`** prepares multiple search spaces (for example normalized latent and PCA-projected variants) to reduce sensitivity to a single geometric view.
+- **`C1/C2/C3`** represent algorithm-specific candidate generation:
+  - `C1` explores K-means partitions over candidate $K$ values,
+  - `C2` explores Gaussian Mixture partitions,
+  - `C3` explores agglomerative partitions.
+- **K-means grid (`C1`)** means running K-means over a grid of candidate hyperparameters (primarily cluster count $K$, plus multiple random restarts). This branch is efficient and works well when latent clusters are approximately compact and centroid-separable.
+- **GMM grid (`C2`)** means fitting Gaussian Mixture Models over candidate $K$ values (and optionally covariance choices/restarts), then converting posterior assignments into hard labels for scoring. This branch is useful when clusters have different variances/shapes and soft probabilistic membership is informative.
+- **Agglomerative grid (`C3`)** means hierarchical clustering runs across candidate $K$ values (and potentially linkage/distance settings), followed by cut-level label extraction and scoring. This branch is valuable when latent structure is non-spherical or nested, though it can be more expensive at larger $N$.
+- **`D: Score by Silhouette`** evaluates each candidate partition using intrinsic quality so candidates from different algorithms can be compared on a common criterion.
+- **`E: Apply constraints and choose best y*`** enforces admissibility constraints (minimum cluster size, runtime budget) and selects the best valid candidate assignment $y^*$.
+- **`F: Gain >= delta?`** is the acceptance gate. The selected candidate is adopted only if quality gain over $y_0$ satisfies the threshold:
+
+```math
+\Delta S = S(y^*) - S(y_0) \ge \delta
+```
+
+- **`G: Use refined labels`** means refinement delivered sufficient benefit and the pipeline promotes $y^*$ to final labels.
+- **`H: Keep original labels`** is a safeguard path that avoids unnecessary label churn when improvement is marginal or unstable.
+
+Operationally, this figure captures a conservative optimization policy: improve quality when there is clear evidence, otherwise preserve the original model output.
+
 ---
 
 ## 10. Complexity Considerations
@@ -586,6 +859,12 @@ Let $N$ be number of points, $m$ latent dimension, $K$ clusters, and $I$ iterati
 - K-means candidate: approximately $O(NKmI)$.
 - GMM candidate (EM): approximately $O(NKmI)$ with covariance overhead.
 - Agglomerative candidate: super-linear, often dominant for large $N$.
+
+Dominant cost depends on data regime:
+
+- large $N$ with hierarchical candidates can make agglomerative search dominant,
+- large restart grids can make K-means/GMM candidates dominant,
+- high-dimensional latent space increases distance and covariance computation cost.
 
 ### 10.2 Ensemble Search Complexity
 
@@ -603,6 +882,14 @@ Through explicit time budgets and bounded candidate sets, effective runtime beco
 \min\left(\text{full search cost},\ T_{max}\right)
 ```
 
+Quality-cost tradeoff can be formalized as:
+
+```math
+\max_{\Theta}\ \mathcal{Q}_{intrinsic}(\Theta)-\lambda T(\Theta)
+```
+
+where $\Theta$ denotes model and refinement hyperparameters, and $\lambda$ encodes latency sensitivity.
+
 ---
 
 ## 11. Security Analytics Layer
@@ -618,6 +905,19 @@ Cluster outputs are mapped to analyst-facing intelligence:
 
 This conversion from unsupervised clusters to actionable security semantics is central for SOC integration.
 
+Two principles make this layer useful in practice:
+
+- **traceability**: every cluster-level claim should be backed by representative raw events,
+- **actionability**: outputs should support concrete decisions (escalate, block, investigate, monitor).
+
+A simplified SOC utility objective:
+
+```math
+\mathcal{U}_{soc}=\alpha \mathcal{R}_{triage}+\beta \mathcal{A}_{decision}-\gamma \mathcal{C}_{analyst}
+```
+
+where $\mathcal{R}_{triage}$ is triage reduction benefit, $\mathcal{A}_{decision}$ is decision quality, and $\mathcal{C}_{analyst}$ is analyst effort.
+
 ---
 
 ## 12. Experimental Design and Evaluation Protocol
@@ -627,6 +927,12 @@ This conversion from unsupervised clusters to actionable security semantics is c
 - fix random seeds across PyTorch and clustering backends,
 - record model hyperparameters and selected refinement outputs,
 - run each configuration multiple times.
+
+For stronger reproducibility, also record:
+
+- parser/feature schema version,
+- stage-level runtimes and hardware context,
+- data snapshot identifiers and time-window boundaries.
 
 ### 12.2 Core Experiments
 
@@ -639,6 +945,12 @@ This conversion from unsupervised clusters to actionable security semantics is c
    - adaptive-$K$ ensemble refinement.
 5. **Runtime-quality Pareto**: metric gains vs postprocessing time budget.
 
+Recommended extensions:
+
+6. **Missingness robustness**: controlled field dropout and noise injection tests.
+7. **Temporal drift evaluation**: train-test splits across different time windows.
+8. **Analyst utility assessment**: time-to-triage and confidence scoring with/without clustering assistance.
+
 ### 12.3 Reporting
 
 Report mean and standard deviation for:
@@ -648,6 +960,13 @@ Report mean and standard deviation for:
 - CH,
 - cluster-size dispersion,
 - runtime breakdown per stage.
+
+Include variability statistics for rigorous reporting:
+
+```math
+\bar{m}=\frac{1}{R}\sum_{r=1}^{R}m_r,\qquad
+s_m^2=\frac{1}{R-1}\sum_{r=1}^{R}(m_r-\bar{m})^2
+```
 
 ---
 
@@ -659,6 +978,12 @@ Report mean and standard deviation for:
 - **Deployment validity**: concept drift and seasonality can degrade quality over time.
 
 Recommended mitigation includes periodic retraining, drift monitoring, and analyst-in-the-loop validation.
+
+Additional mitigation practices:
+
+- benchmark against a curated set of historically validated incidents,
+- monitor semantic drift in cluster profiles (not only scalar metrics),
+- define rollback thresholds for production degradation.
 
 ---
 
@@ -673,6 +998,14 @@ A target such as $0.4+$ may be achievable for some datasets but is not universal
 
 Therefore, optimization should use multi-metric and operational criteria, not a single scalar target.
 
+A practical policy is to optimize relative improvement rather than absolute universal thresholds:
+
+```math
+\Delta S = S_{\text{new}} - S_{\text{baseline}}
+```
+
+and accept updates only when improvements are also reflected in analyst-facing utility.
+
 ---
 
 ## 15. Future Directions
@@ -685,6 +1018,12 @@ Potential research and engineering extensions:
 - online/incremental clustering for streaming SOC workflows,
 - stability-based automatic $K$ selection,
 - analyst feedback loops for weak supervision.
+
+Further high-impact directions include:
+
+- uncertainty-aware escalation policies from probabilistic assignments,
+- multimodal fusion (network + endpoint + identity signals),
+- retrieval-augmented cluster narratives for faster analyst interpretation.
 
 ---
 
@@ -699,4 +1038,6 @@ This system implements a production-aware deep clustering framework for security
 - and threat-centric interpretation.
 
 The resulting design is both scientifically grounded and operationally actionable, with explicit mechanisms to balance quality and runtime in real deployments.
+
+Overall, the framework should be evaluated as a decision-support system, not only as a clustering engine. Its practical value comes from the interaction between representation quality, assignment quality, bounded optimization, and explainable security outputs that directly improve SOC triage and response workflows.
 
