@@ -97,6 +97,64 @@ z_i = f_\theta(x_i), \quad y_i = g(z_i)
 
 Given no reliable labels for most production streams, optimization is unsupervised and quality is assessed through intrinsic criteria (Silhouette, DBI, CH), cluster stability, and downstream security utility.
 
+### 2.1 Why This Problem Must Be Researched in Security
+
+In enterprise and cloud security operations, analysts face an asymmetry problem: telemetry volume grows faster than human triage capacity. Attackers exploit this asymmetry through high-noise tactics (alert flooding, low-and-slow behavior, distributed probing), making manual pattern discovery both expensive and error-prone.
+
+This creates a strong research need for unsupervised clustering that can:
+
+- group semantically related events without labeled attack truth,
+- reveal campaign-like behavior spanning multiple tools/subsystems,
+- prioritize analyst attention toward high-risk patterns,
+- reduce cognitive load and mean-time-to-understand (MTTU).
+
+Unlike many generic clustering tasks, security clustering has mission-critical consequences. Poor grouping can hide attack progression, while useful grouping can compress thousands of low-level logs into actionable incident hypotheses.
+
+### 2.2 Security-Specific Challenges
+
+The security domain imposes constraints that make this problem nontrivial:
+
+- **Label sparsity**: reliable ground truth is limited, delayed, or incomplete.
+- **Non-stationarity**: attacker behavior and defensive controls evolve over time.
+- **Heterogeneous telemetry**: logs from different products have different schemas and semantics.
+- **Extreme imbalance**: truly malicious events are often rare relative to benign background traffic.
+- **Adversarial pressure**: attackers deliberately generate evasive and noisy patterns.
+
+Therefore, clustering must be robust not only statistically, but operationally, under drift and ambiguity.
+
+### 2.3 Why the Target Objective Matters
+
+The research objective is not merely to optimize an abstract metric; it is to improve security outcomes. Achieving compact, well-separated latent clusters supports:
+
+- **Early threat discovery**: suspicious micro-patterns become visible before rule signatures exist.
+- **Attack-chain visibility**: related events can be linked across time and subsystems.
+- **Triage acceleration**: analysts investigate a smaller set of cluster-level entities instead of raw event streams.
+- **Prioritization quality**: critical/high-risk clusters are easier to isolate and escalate.
+- **Knowledge transfer**: cluster profiles can be reused for threat hunting and detection engineering.
+
+In practical SOC terms, this maps to faster detection-to-response loops and lower risk of missed incidents.
+
+### 2.4 Formal Security Utility Perspective
+
+Let $\mathcal{I}(y)$ denote incident utility of assignments $y$, reflecting analyst-facing value (prioritization accuracy, cluster interpretability, threat enrichment quality). The system seeks high intrinsic structure while preserving operational utility:
+
+```math
+\max_{f_\theta,\,g} \ \mathcal{Q}_{intrinsic}(y, Z) + \lambda \,\mathcal{I}(y)
+```
+
+where $\mathcal{Q}_{intrinsic}$ aggregates intrinsic quality signals (e.g., Silhouette, DBI, CH) and $\lambda$ controls emphasis on SOC utility. This framing clarifies why research should jointly optimize geometric quality and security relevance.
+
+### 2.5 Success Criteria Under Security Constraints
+
+A meaningful solution in this domain should satisfy:
+
+1. intrinsic quality improvement over shallow baselines,
+2. stable clusters under moderate data perturbations,
+3. actionable semantic profiles for analyst workflows,
+4. bounded runtime compatible with production response windows.
+
+Hence, this problem is worth pursuing because it addresses both scientific challenges (unsupervised representation and partitioning under drift/noise) and operational security needs (faster, more reliable incident understanding).
+
 ---
 
 ## 3. Research Contributions of This System
@@ -137,6 +195,13 @@ flowchart TD
     M --> N[Security Insights and Recommendations]
 ```
 
+This pipeline describes how raw, heterogeneous security telemetry is transformed into analyst-facing cluster entities. Key design choices include:
+
+- **Separation of concerns**: parsing/feature extraction produces a stable numeric representation, while representation learning and clustering operate in the latent space.
+- **Two-stage clustering**: an initial clustering process provides seeds for deep objectives, and a post-fine-tuning latent refinement step can correct assignments under intrinsic criteria.
+- **Metric consistency**: intrinsic metrics are computed from the same latent embeddings that drive clustering, making quality scores comparable across runs and API endpoints.
+- **Threat-centric output**: clustering labels are not treated as the final deliverable; they are used to build semantic cluster profiles and derive threat insights for SOC workflows.
+
 ### 4.2 Runtime Component View
 
 ```mermaid
@@ -151,6 +216,15 @@ flowchart LR
     ANALYZER --> U
     INSIGHTS --> U
 ```
+
+The runtime view emphasizes where computation and data transformation occur:
+
+- The **Frontend** submits a training job and polls job state; it never directly performs heavy ML computations.
+- The **FastAPI Service** manages job metadata, runs training in background, and ensures the HTTP layer remains responsive.
+- The **DeepClusteringTrainer** wraps representation learning and clustering objectives, producing final latent embeddings and base cluster assignments.
+- The **Latent Refinement Engine** performs post-training search over candidate partitions using intrinsic metrics, improving quality without changing the learned encoder weights.
+- The **Cluster Analyzer** aggregates point-level predictions into cluster-level profiles (dominant subsystems/actions, representative events, size statistics).
+- The **Security Insights Engine** converts cluster profiles into SOC-style intelligence (threat indicators, recommended actions, and correlations across clusters).
 
 ### 4.3 Stage Transitions
 
@@ -168,6 +242,16 @@ stateDiagram-v2
     fine_tuning --> failed
     postprocessing --> failed
 ```
+
+Stage transitions make compute-time behavior explicit, which is critical in security analytics where users expect deterministic progress semantics. In this pipeline:
+
+- `parsing`: converts raw log strings into typed event objects and a numeric feature matrix; failures here typically indicate malformed input or unsupported schema.
+- `pretraining`: learns a smooth latent representation by reconstruction (DEC/IDEC/VaDE) or representation consistency (contrastive); this reduces sensitivity to initialization.
+- `initialization`: derives initial cluster seeds in latent space (e.g., GMM/K-means or model-specific initialization); deep clustering objectives are sensitive to these seeds.
+- `fine_tuning`: optimizes the clustering objective while monitoring assignment drift and intrinsic metrics; early stopping can occur when label assignments stabilize.
+- `postprocessing`: refines the final partition by latent ensemble search with guardrails (time budget and cluster-size constraints), improving intrinsic metric values and cluster interpretability.
+
+If the system reports `fine_tuning complete` but the job has not reached `completed`, it is usually performing this bounded `postprocessing` optimization rather than being stuck.
 
 ---
 
