@@ -7,7 +7,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-from sklearn.metrics import normalized_mutual_info_score, adjusted_rand_score, silhouette_score
+from sklearn.metrics import (
+    normalized_mutual_info_score,
+    adjusted_rand_score,
+    silhouette_score,
+    davies_bouldin_score,
+    calinski_harabasz_score,
+)
 from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass
 from enum import Enum
@@ -88,15 +94,23 @@ class ClusteringMetrics:
         
         # External metrics (require ground truth)
         if labels_true is not None:
-            metrics['nmi'] = normalized_mutual_info_score(labels_true, labels_pred)
-            metrics['ari'] = adjusted_rand_score(labels_true, labels_pred)
+            metrics['nmi'] = float(normalized_mutual_info_score(labels_true, labels_pred))
+            metrics['ari'] = float(adjusted_rand_score(labels_true, labels_pred))
         
         # Internal metrics
         if features is not None and len(np.unique(labels_pred)) > 1:
             try:
-                metrics['silhouette'] = silhouette_score(features, labels_pred)
+                metrics['silhouette'] = float(silhouette_score(features, labels_pred))
             except Exception:
                 metrics['silhouette'] = -1.0
+            try:
+                metrics['davies_bouldin'] = float(davies_bouldin_score(features, labels_pred))
+            except Exception:
+                metrics['davies_bouldin'] = -1.0
+            try:
+                metrics['calinski_harabasz'] = float(calinski_harabasz_score(features, labels_pred))
+            except Exception:
+                metrics['calinski_harabasz'] = -1.0
         
         # Cluster distribution
         unique, counts = np.unique(labels_pred, return_counts=True)

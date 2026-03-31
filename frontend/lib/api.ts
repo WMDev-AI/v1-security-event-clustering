@@ -76,6 +76,16 @@ export interface AnalysisResponse {
     avg_cluster_size: number;
     size_range: { min: number; max: number };
   };
+  intrinsic_metrics: {
+    silhouette?: number;
+    davies_bouldin?: number;
+    calinski_harabasz?: number;
+    n_clusters_found?: number;
+    cluster_sizes?: Record<string, number>;
+    size_std?: number;
+    size_min?: number;
+    size_max?: number;
+  } | null;
   latent_visualization: {
     points: { x: number; y: number; cluster: number }[];
     explained_variance: number[];

@@ -126,6 +126,7 @@ class AnalysisResponse(BaseModel):
     n_clusters: int
     clusters: list[ClusterResult]
     summary: dict
+    intrinsic_metrics: Optional[dict] = None
     latent_visualization: Optional[dict] = None
 
 
@@ -417,6 +418,7 @@ async def get_results(job_id: str):
     summary = model_data["summary"]
     latent = model_data["latent"]
     labels = model_data["labels"]
+    intrinsic_metrics = ClusteringMetrics.compute_all(labels, features=latent)
     
     # Prepare cluster results
     clusters = []
@@ -452,6 +454,7 @@ async def get_results(job_id: str):
         n_clusters=len(profiles),
         clusters=clusters,
         summary=summary,
+        intrinsic_metrics=intrinsic_metrics,
         latent_visualization=visualization
     )
 

@@ -157,6 +157,13 @@ export default function SecurityClusteringApp() {
     setError(null)
   }
 
+  const formatMetric = (value?: number) => {
+    if (value === undefined || value === null || value < 0 || Number.isNaN(value)) {
+      return 'N/A'
+    }
+    return value.toFixed(4)
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -384,6 +391,34 @@ export default function SecurityClusteringApp() {
                   <CardDescription>High Risk Clusters</CardDescription>
                   <CardTitle className="text-2xl text-orange-500">
                     {results.summary.high_risk_clusters.length}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+            </div>
+
+            {/* Intrinsic Clustering Metrics */}
+            <div className="grid gap-4 md:grid-cols-3">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Silhouette Score</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatMetric(results.intrinsic_metrics?.silhouette)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Davies-Bouldin Index</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatMetric(results.intrinsic_metrics?.davies_bouldin)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Calinski-Harabasz Score</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatMetric(results.intrinsic_metrics?.calinski_harabasz)}
                   </CardTitle>
                 </CardHeader>
               </Card>
