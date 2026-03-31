@@ -845,6 +845,64 @@ This figure summarizes the bounded refinement decision process in latent space:
 - **`G: Use refined labels`** means refinement delivered sufficient benefit and the pipeline promotes $y^*$ to final labels.
 - **`H: Keep original labels`** is a safeguard path that avoids unnecessary label churn when improvement is marginal or unstable.
 
+The theoretical workflow for these branches can be written as:
+
+```math
+\text{For each } a \in \mathcal{A}=\{\text{KMeans},\text{GMM},\text{Agg}\},\
+\text{for each } K\in\mathcal{K},\
+\text{for each } r\in\mathcal{R}_a:
+\quad y_{a,K,r} \leftarrow \mathcal{M}_{a,K,r}(Z)
+```
+
+```math
+\hat{y}=\arg\max_{y\in\{y_{a,K,r}\}} \mathrm{Silhouette}(Z,y)
+\quad \text{s.t.} \quad
+\min_k |C_k(y)|\ge n_{\min},\ T(y)\le T_{\max}
+```
+
+Algorithm-specific objective views:
+
+- **K-means grid** (minimize within-cluster sum of squares):
+
+```math
+\min_{\{\mu_k\},y}\ \sum_{i=1}^{N}\left\|z_i-\mu_{y_i}\right\|_2^2,
+\quad y_i\in\{1,\dots,K\}
+```
+
+This is typically solved by alternating assignment and centroid-update steps for each $(K,r)$ pair.
+
+- **GMM grid** (maximize mixture likelihood):
+
+```math
+\max_{\Theta}\ \sum_{i=1}^{N}\log\left(\sum_{k=1}^{K}\pi_k\,\mathcal{N}(z_i\mid\mu_k,\Sigma_k)\right),
+\quad \Theta=\{\pi_k,\mu_k,\Sigma_k\}_{k=1}^{K}
+```
+
+Posterior responsibilities:
+
+```math
+\gamma_{ik}=\frac{\pi_k\,\mathcal{N}(z_i\mid\mu_k,\Sigma_k)}
+{\sum_{j=1}^{K}\pi_j\,\mathcal{N}(z_i\mid\mu_j,\Sigma_j)}
+```
+
+Hard labels are derived by $y_i=\arg\max_k \gamma_{ik}$ for scoring/selection.
+
+- **Agglomerative grid** (hierarchical linkage optimization):
+
+```math
+\min_{A,B}\ d_{\text{link}}(A,B)
+```
+
+where at each merge step the pair of clusters $(A,B)$ with minimal linkage distance is merged (e.g., Ward linkage minimizes increase in within-cluster variance). For each candidate $K$, the dendrogram is cut to yield labels $y$.
+
+Selection among branches then uses a unified intrinsic criterion:
+
+```math
+y^*=\arg\max_{y\in\mathcal{Y}_{\text{valid}}}\mathrm{Silhouette}(Z,y),
+\quad
+\Delta S = S(y^*)-S(y_0)
+```
+
 Operationally, this figure captures a conservative optimization policy: improve quality when there is clear evidence, otherwise preserve the original model output.
 
 ---
