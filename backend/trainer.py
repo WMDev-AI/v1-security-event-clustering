@@ -14,6 +14,9 @@ from sklearn.metrics import (
     davies_bouldin_score,
     calinski_harabasz_score,
 )
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import AgglomerativeClustering
 from typing import Optional, Callable, Awaitable
 from dataclasses import dataclass
 from enum import Enum
@@ -591,6 +594,108 @@ class DeepClusteringTrainer:
         latent = self.get_latent_representations(data)
         
         return ClusteringMetrics.compute_all(labels_pred, labels_true, latent)
+
+    def refine_cluster_assignments(
+        self,
+        latent: np.ndarray,
+        initial_labels: np.ndarray,
+        n_trials: int = 8,
+        min_gain: float = 0.01
+    ) -> tuple[np.ndarray, dict]:
+        """
+        Refine cluster assignments in latent space using multiple K-Means restarts.
+        Uses the assignment with the best silhouette score when it improves enough.
+        """
+        result = {
+            "applied": False,
+            "method": "model_predict",
+            "silhouette_before": -1.0,
+            "silhouette_after": -1.0,
+            "silhouette_gain": 0.0,
+        }
+
+        if latent is None or len(latent) < 3:
+            return initial_labels, result
+
+        unique_labels = np.unique(initial_labels)
+        if len(unique_labels) < 2:
+            return initial_labels, result
+
+        # Normalize latent space for metric stability and K-Means distance quality.
+        latent_scaled = latent.astype(np.float32, copy=False)
+        latent_scaled = (latent_scaled - latent_scaled.mean(axis=0)) / (latent_scaled.std(axis=0) + 1e-8)
+
+        try:
+            base_score = float(silhouette_score(latent_scaled, initial_labels))
+        except Exception:
+            base_score = -1.0
+
+        best_labels = initial_labels
+        best_score = base_score
+        n_clusters = len(unique_labels)
+
+        for trial in range(max(1, n_trials)):
+            try:
+                kmeans = KMeans(
+                    n_clusters=n_clusters,
+                    n_init=1,
+                    random_state=42 + trial,
+                    max_iter=500
+                )
+                candidate_labels = kmeans.fit_predict(latent_scaled)
+
+                if len(np.unique(candidate_labels)) < 2:
+                    continue
+
+                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
+                if candidate_score > best_score:
+                    best_score = candidate_score
+                    best_labels = candidate_labels
+            except Exception:
+                continue
+
+        # Gaussian Mixture candidates in latent space.
+        for trial in range(max(1, n_trials // 2)):
+            try:
+                gmm = GaussianMixture(
+                    n_components=n_clusters,
+                    covariance_type="full",
+                    reg_covar=1e-5,
+                    max_iter=300,
+                    random_state=101 + trial,
+                )
+                candidate_labels = gmm.fit_predict(latent_scaled)
+                if len(np.unique(candidate_labels)) < 2:
+                    continue
+                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
+                if candidate_score > best_score:
+                    best_score = candidate_score
+                    best_labels = candidate_labels
+            except Exception:
+                continue
+
+        # Agglomerative candidate for better non-spherical clusters.
+        try:
+            agg = AgglomerativeClustering(n_clusters=n_clusters, linkage="ward")
+            candidate_labels = agg.fit_predict(latent_scaled)
+            if len(np.unique(candidate_labels)) > 1:
+                candidate_score = float(silhouette_score(latent_scaled, candidate_labels))
+                if candidate_score > best_score:
+                    best_score = candidate_score
+                    best_labels = candidate_labels
+        except Exception:
+            pass
+
+        result["silhouette_before"] = base_score
+        result["silhouette_after"] = best_score
+        result["silhouette_gain"] = float(best_score - base_score)
+
+        if result["silhouette_gain"] >= min_gain:
+            result["applied"] = True
+            result["method"] = "latent_ensemble_refinement"
+            return best_labels.astype(np.int64, copy=False), result
+
+        return initial_labels, result
     
     def predict(self, data: np.ndarray) -> np.ndarray:
         """Predict cluster assignments for data"""

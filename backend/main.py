@@ -241,6 +241,7 @@ async def run_training(
         # Get final results
         labels = trainer.predict(features)
         latent = trainer.get_latent_representations(features)
+        labels, refinement_info = trainer.refine_cluster_assignments(latent, labels)
         probs = trainer.get_cluster_probabilities(features)
         
         # Analyze clusters
@@ -254,6 +255,7 @@ async def run_training(
             "labels": labels,
             "latent": latent,
             "probs": probs,
+            "refinement_info": refinement_info,
             "profiles": profiles,
             "summary": summary,
             "feature_mean": features.mean(axis=0),
@@ -264,6 +266,7 @@ async def run_training(
         training_jobs[job_id]["progress"] = 100
         training_jobs[job_id]["message"] = "Training completed successfully"
         training_jobs[job_id]["metrics"] = ClusteringMetrics.compute_all(labels, features=latent)
+        training_jobs[job_id]["refinement"] = refinement_info
         
     except Exception as e:
         training_jobs[job_id]["status"] = "failed"
