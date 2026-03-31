@@ -15,12 +15,12 @@ Let a corpus of parsed security events be represented as:
 ```
 
 
-where each \(x_i\) is a normalized feature vector extracted from raw logs (timestamps, network fields, subsystem, action, severity, content-derived indicators, etc.).
+where each $x_i$ is a normalized feature vector extracted from raw logs (timestamps, network fields, subsystem, action, severity, content-derived indicators, etc.).
 
 The objective is to learn:
 
-1. A latent mapping \(f_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{m}\), \(m \ll d\), and  
-2. A cluster assignment function \(g\) that partitions latent points:
+1. A latent mapping $f_\theta: \mathbb{R}^{d} \rightarrow \mathbb{R}^{m}$, $m \ll d$, and  
+2. A cluster assignment function $g$ that partitions latent points:
 
 ```math
 z_i = f_\theta(x_i), \quad y_i = g(z_i), \quad y_i \in \{1,\dots,K\}
@@ -51,13 +51,13 @@ flowchart TD
 
 ## 3. Data Representation and Preprocessing
 
-For each feature dimension \(j\), standardization is applied:
+For each feature dimension $j$, standardization is applied:
 
 ```math
 \tilde{x}_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j + \epsilon}
 ```
 
-where \(\mu_j\) and \(\sigma_j\) are empirical mean and standard deviation over the training set, and \(\epsilon\) is a small constant for numerical stability.
+where $\mu_j$ and $\sigma_j$ are empirical mean and standard deviation over the training set, and $\epsilon$ is a small constant for numerical stability.
 
 ---
 
@@ -65,7 +65,7 @@ where \(\mu_j\) and \(\sigma_j\) are empirical mean and standard deviation over 
 
 ### 4.1 Deep Embedded Clustering (DEC)
 
-DEC learns cluster-oriented latent representations by minimizing KL divergence between a soft assignment \(Q\) and a sharpened target distribution \(P\).
+DEC learns cluster-oriented latent representations by minimizing KL divergence between a soft assignment $Q$ and a sharpened target distribution $P$.
 
 Student-t soft assignment:
 
@@ -98,7 +98,7 @@ IDEC augments DEC with reconstruction preservation:
 \mathcal{L}_{rec} = \frac{1}{N}\sum_{i=1}^{N}\|x_i-\hat{x}_i\|_2^2
 ```
 
-where \(\gamma\) controls the reconstruction regularization strength.
+where $\gamma$ controls the reconstruction regularization strength.
 
 ### 4.3 Variational Deep Embedding (VaDE)
 
@@ -118,9 +118,9 @@ which can be interpreted as reconstruction fidelity plus regularized latent mixt
 
 ### 4.4 Contrastive Deep Clustering
 
-Two stochastic views \(x_i^{(1)}, x_i^{(2)}\) are produced by feature dropout. Encoder outputs are aligned using contrastive learning and consistency regularization.
+Two stochastic views $x_i^{(1)}, x_i^{(2)}$ are produced by feature dropout. Encoder outputs are aligned using contrastive learning and consistency regularization.
 
-For similarity \(s(u,v)\) and temperature \(\tau\), InfoNCE-style term:
+For similarity $s(u,v)$ and temperature $\tau$, InfoNCE-style term:
 
 ```math
 \mathcal{L}_{con} = -\sum_i \log
@@ -134,7 +134,7 @@ Total objective:
 \mathcal{L}_{total} = \mathcal{L}_{con} + \lambda_{cons}\mathcal{L}_{cons} + \lambda_{ent}\mathcal{L}_{ent}
 ```
 
-where \(\mathcal{L}_{cons}\) enforces view-consistent assignments and \(\mathcal{L}_{ent}\) avoids degenerate low-entropy collapse.
+where $\mathcal{L}_{cons}$ enforces view-consistent assignments and $\mathcal{L}_{ent}$ avoids degenerate low-entropy collapse.
 
 ---
 
@@ -176,7 +176,7 @@ sequenceDiagram
 s(i)=\frac{b(i)-a(i)}{\max\{a(i),b(i)\}}
 ```
 
-where \(a(i)\) is mean intra-cluster distance and \(b(i)\) is mean nearest-cluster distance. Global score:
+where $a(i)$ is mean intra-cluster distance and $b(i)$ is mean nearest-cluster distance. Global score:
 
 ```math
 S=\frac{1}{N}\sum_i s(i), \quad S\in[-1,1]
@@ -191,7 +191,7 @@ Higher is better.
 \frac{\sigma_i+\sigma_j}{d(c_i,c_j)}
 ```
 
-where \(\sigma_i\) is average within-cluster scatter and \(d(c_i,c_j)\) is centroid distance. Lower is better.
+where $\sigma_i$ is average within-cluster scatter and $d(c_i,c_j)$ is centroid distance. Lower is better.
 
 ### 6.3 Calinski-Harabasz Score (CH)
 
@@ -201,7 +201,7 @@ where \(\sigma_i\) is average within-cluster scatter and \(d(c_i,c_j)\) is centr
 {\mathrm{Tr}(W_K)/(N-K)}
 ```
 
-where \(B_K\) is between-cluster dispersion and \(W_K\) is within-cluster dispersion. Higher is better.
+where $B_K$ is between-cluster dispersion and $W_K$ is within-cluster dispersion. Higher is better.
 
 ---
 
@@ -210,7 +210,7 @@ where \(B_K\) is between-cluster dispersion and \(W_K\) is within-cluster disper
 After deep model inference, labels are refined by searching over:
 
 - Multiple clustering algorithms (K-means, GMM, Agglomerative),
-- Multiple candidate cluster counts \(K\),
+- Multiple candidate cluster counts $K$,
 - Multiple latent projections (original normalized latent + PCA variants),
 - Validity constraints on minimal cluster size.
 
@@ -226,14 +226,14 @@ with acceptance criterion:
 \Delta S = S(y^*) - S(y_0) \ge \delta
 ```
 
-where \(y_0\) is model-predicted labels and \(\delta\) is a minimum gain threshold.
+where $y_0$ is model-predicted labels and $\delta$ is a minimum gain threshold.
 
 ### Computational Guardrails
 
 To prevent runtime stalls, refinement is bounded by:
 
-- Maximum search time budget \(T_{max}\),
-- Bounded \(K\)-range,
+- Maximum search time budget $T_{max}$,
+- Bounded $K$-range,
 - Controlled restart counts.
 
 This provides a practical quality-latency tradeoff in production.
@@ -242,12 +242,12 @@ This provides a practical quality-latency tradeoff in production.
 
 ## 8. Complexity Considerations
 
-Let \(N\) be samples, \(m\) latent dimension, \(K\) clusters.
+Let $N$ be samples, $m$ latent dimension, $K$ clusters.
 
-- **Encoder inference**: \(O(N \cdot \text{NN-forward-cost})\)
-- **K-means trial**: approximately \(O(NKmI)\) for \(I\) iterations
-- **Agglomerative**: can be super-linear in \(N\), typically expensive
-- **GMM (EM)**: approximately \(O(NKmI)\), with covariance overhead
+- **Encoder inference**: $O(N \cdot \text{NN-forward-cost})$
+- **K-means trial**: approximately $O(NKmI)$ for $I$ iterations
+- **Agglomerative**: can be super-linear in $N$, typically expensive
+- **GMM (EM)**: approximately $O(NKmI)$, with covariance overhead
 
 Total refinement complexity scales with:
 
@@ -280,27 +280,27 @@ For reproducible evaluation:
 2. Evaluate each configuration over multiple runs.
 3. Report mean and standard deviation of Silhouette, DBI, CH.
 4. Sweep:
-   - latent dimension \(m\),
-   - requested clusters \(K\),
+   - latent dimension $m$,
+   - requested clusters $K$,
    - model family (DEC/IDEC/VaDE/contrastive),
    - training epochs and regularization.
 5. Add ablation:
    - with/without refinement,
    - with/without PCA projection search,
-   - fixed-\(K\) vs adaptive-\(K\) search.
+   - fixed-$K$ vs adaptive-$K$ search.
 
 ---
 
 ## 11. Practical Notes on Silhouette Targets
 
-A Silhouette target such as \(0.4+\) can be realistic for some datasets but not all. For heterogeneous security telemetry:
+A Silhouette target such as $0.4+$ can be realistic for some datasets but not all. For heterogeneous security telemetry:
 
 - overlaps between normal and suspicious behavior,
 - class imbalance,
 - weakly informative fields,
 - mixed temporal regimes
 
-can constrain separability in Euclidean latent spaces. Therefore, improvements should be interpreted jointly across \(S\), DBI, CH, and downstream analyst utility.
+can constrain separability in Euclidean latent spaces. Therefore, improvements should be interpreted jointly across $S$, DBI, CH, and downstream analyst utility.
 
 ---
 
