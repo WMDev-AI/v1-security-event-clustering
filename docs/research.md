@@ -943,11 +943,23 @@ Two principles make this layer useful in practice:
 - **traceability**: every cluster-level claim should be backed by representative raw events,
 - **actionability**: outputs should support concrete decisions (escalate, block, investigate, monitor).
 
-A simplified SOC utility objective:
+**A simplified SOC utility objective.** Security operations rarely optimize a single metric (such as Silhouette on embeddings). Operationally, leadership cares about **compressing alert volume**, **improving decisions**, and **controlling human cost**. A compact way to express that tradeoff is to define a scalar **utility** that rewards good outcomes and penalizes analyst burden:
 
 $\mathcal{U}_{soc}=\alpha \mathcal{R}_{triage}+\beta \mathcal{A}_{decision}-\gamma \mathcal{C}_{analyst}$
 
-where $\mathcal{R}_{triage}$ is triage reduction benefit, $\mathcal{A}_{decision}$ is decision quality, and $\mathcal{C}_{analyst}$ is analyst effort.
+The symbols are interpreted as follows.
+
+- **$\mathcal{U}_{soc}$ (overall SOC utility)** — A notional score to **maximize** when comparing two system configurations (e.g. clustering + insights A vs B), or when deciding whether a model update is “worth it.” It is **not** automatically computed in the codebase; it is a **conceptual target** for evaluation design. Higher $\mathcal{U}_{soc}$ means the stack better supports the SOC mission under your chosen weights.
+
+- **$\mathcal{R}_{triage}$ (triage reduction benefit)** — How much the clustering and narrative layer **reduces raw triage load** without hiding incidents. Proxies include: fewer **distinct analyst work items** after grouping (events per cluster vs per event), shorter **mean time to first understanding** when analysts start from cluster summaries instead of unstructured queues, and **coverage** of the original stream (no silent drops). A strict formulation would require a baseline (“unclustered queue”) and the same time window for fair comparison.
+
+- **$\mathcal{A}_{decision}$ (decision quality)** — How much the outputs improve **downstream security decisions**: correct escalations, timely containment, fewer false escalations on benign clusters, alignment with **validated** incidents or purple-team exercises. In research terms this is often **partially labeled**; in production it may be scored via **post-incident review**, **ticket outcomes**, or **analyst ratings** of cluster usefulness. Intrinsic clustering metrics (Silhouette, etc.) may **correlate** with $\mathcal{A}_{decision}$ but are not substitutes for it.
+
+- **$\mathcal{C}_{analyst}$ (analyst effort / cost)** — The **human price** of using the system: wall-clock review time, number of clicks or drill-downs, **cognitive load** from contradictory or empty clusters, retraining and playbook updates, and **alert fatigue** if clusters are too granular or too noisy. This term is **subtracted** because effort is a cost, not a benefit.
+
+- **$\alpha$, $\beta$, $\gamma$ (nonnegative weights)** — They set the **relative importance** of triage gain vs decision quality vs analyst cost for your organization. For example, a mature SOC with severe staffing constraints might increase $\gamma$ so that solutions that explode review time are disfavored even if they slightly improve embedding metrics; a greenfield SOC might emphasize $\mathcal{R}_{triage}$ first to get control of volume ($\alpha$ large), then raise $\beta$ as ground truth labels become available. In practice these weights are **implicit** in leadership priorities; making them explicit clarifies why “best cluster quality” alone is an incomplete goal.
+
+**How to use this expression in practice.** Treat $\mathcal{R}_{triage}$, $\mathcal{A}_{decision}$, and $\mathcal{C}_{analyst}$ as **measurable surrogates** you define (dashboards, sampling studies, periodic reviews), not as built-in API fields. Re-estimate them when **log sources**, **threat model**, or **staffing** change. If two objectives conflict (e.g. finer clusters improve separation but raise $\mathcal{C}_{analyst}$), the weighted sum makes the tradeoff discussable; alternatively, keep $\mathcal{U}_{soc}$ as a narrative **Pareto** story (improve triage and decisions **without** increasing analyst hours above a cap).
 
 ### 11.1 Measuring security insights, priority actions, and cluster risk
 
