@@ -541,20 +541,21 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 
 ## 12. Frontend UI components, workflow, interactions, and event handling
 
-This section documents the **Next.js** frontend under `frontend/`: layout, the main page state machine, child components, user-driven events, and how they call `frontend/lib/api.ts`.
+This section documents the **React** (Webpack-bundled SPA) frontend under `frontend/`: HTML shell, the main page state machine, child components, user-driven events, and how they call `frontend/lib/api.ts`.
 
 ### 12.1 Technology stack and entry points
 
 | Item | Location | Notes |
 |------|-----------|--------|
-| App shell | `frontend/app/layout.tsx` | Server component: `metadata`, Google fonts (`Inter`, `JetBrains_Mono`), `className="dark"` on `<html>`, global `globals.css`. |
-| Main UI | `frontend/app/page.tsx` | `"use client"` — all interactive logic and API polling live here. |
+| HTML shell | `frontend/public/index.html` | `#root`, `class="dark"` on `<html>`, Google Fonts (`Inter`, `JetBrains Mono`). |
+| Bootstrap | `frontend/src/index.tsx` | `createRoot` → `<App />`, imports `src/globals.css`. |
+| Main UI | `frontend/src/App.tsx` | Interactive logic and API polling. |
 | API client | `frontend/lib/api.ts` | `fetch` wrappers; base URL `http://localhost:8000/api`. |
 | Shared UI | `frontend/components/ui/*` | shadcn-style primitives (`Button`, `Card`, `Tabs`, `Badge`, `Progress`, `ScrollArea`, `Slider`, `Select`, `Tooltip`, etc.). |
 
 ### 12.2 Application state machine (`AppState`)
 
-The root component `SecurityClusteringApp` uses:
+The root component `App` uses:
 
 `type AppState = 'idle' | 'configuring' | 'training' | 'completed' | 'error'`
 

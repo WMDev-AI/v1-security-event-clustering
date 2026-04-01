@@ -1,5 +1,3 @@
-"use client"
-
 import { useState, useEffect, useCallback } from 'react'
 import {
   Shield,
@@ -36,11 +34,11 @@ import {
 
 type AppState = 'idle' | 'configuring' | 'training' | 'completed' | 'error'
 
-export default function SecurityClusteringApp() {
+export default function App() {
   const [state, setState] = useState<AppState>('idle')
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking')
   const [deviceInfo, setDeviceInfo] = useState<string>('')
-  const [sampleEvents, setSampleEvents] = useState<string[]>([])
+  const [, setSampleEvents] = useState<string[]>([])
   const [loadedEvents, setLoadedEvents] = useState<string[]>([])
   const [uploadedFilename, setUploadedFilename] = useState<string>('')
   const [jobId, setJobId] = useState<string | null>(null)
@@ -50,15 +48,13 @@ export default function SecurityClusteringApp() {
   const [insightsLoading, setInsightsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Check backend health on mount
   useEffect(() => {
     const checkBackend = async () => {
       try {
         const health = await checkHealth()
         setBackendStatus('online')
         setDeviceInfo(health.device)
-        
-        // Load sample events
+
         const demo = await getDemoEvents()
         setSampleEvents(demo.sample_events)
       } catch {
@@ -68,21 +64,18 @@ export default function SecurityClusteringApp() {
     checkBackend()
   }, [])
 
-  // Poll training status
   useEffect(() => {
     if (!jobId || state !== 'training') return
 
-    let pollInterval: NodeJS.Timeout | null = null
+    let pollInterval: ReturnType<typeof setInterval> | null = null
     let abortController: AbortController | null = null
     let isPolling = false
 
     const poll = async () => {
-      // Prevent concurrent polls
       if (isPolling) return
       isPolling = true
 
       try {
-        // Cancel previous request if it's still pending
         if (abortController) {
           abortController.abort()
         }
@@ -95,8 +88,7 @@ export default function SecurityClusteringApp() {
           const res = await getResults(jobId)
           setResults(res)
           setState('completed')
-          
-          // Load security insights after completion
+
           setInsightsLoading(true)
           try {
             const insightsData = await getSecurityInsights(jobId)
@@ -111,7 +103,6 @@ export default function SecurityClusteringApp() {
           setState('error')
         }
       } catch (err) {
-        // Don't log abort errors (expected when request is cancelled)
         if (err instanceof Error && err.name !== 'AbortError') {
           console.error('Polling error:', err)
         }
@@ -120,10 +111,7 @@ export default function SecurityClusteringApp() {
       }
     }
 
-    // Start polling with 1.5 second interval to allow responses to complete
     pollInterval = setInterval(poll, 1500)
-    
-    // Poll immediately on first load
     poll()
 
     return () => {
@@ -166,7 +154,6 @@ export default function SecurityClusteringApp() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
       <header className="border-b border-border bg-card">
         <div className="container mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
@@ -204,10 +191,8 @@ export default function SecurityClusteringApp() {
       </header>
 
       <main className="container mx-auto px-4 py-8">
-        {/* Idle State - Feature Overview */}
         {state === 'idle' && (
           <div className="max-w-4xl mx-auto space-y-8">
-            {/* Hero */}
             <div className="text-center space-y-4">
               <div className="inline-flex items-center gap-2 bg-primary/10 text-primary px-4 py-1.5 rounded-full text-sm">
                 <Brain className="h-4 w-4" />
@@ -217,7 +202,7 @@ export default function SecurityClusteringApp() {
                 Cluster Your Security Events
               </h2>
               <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-                Use deep clustering algorithms to automatically group millions of security 
+                Use deep clustering algorithms to automatically group millions of security
                 events into meaningful clusters and extract actionable threat intelligence.
               </p>
               <Button
@@ -229,7 +214,6 @@ export default function SecurityClusteringApp() {
               </Button>
             </div>
 
-            {/* Features */}
             <div className="grid gap-4 md:grid-cols-3">
               <Card>
                 <CardHeader>
@@ -265,7 +249,6 @@ export default function SecurityClusteringApp() {
               </Card>
             </div>
 
-            {/* Supported Subsystems */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Supported Security Subsystems</CardTitle>
@@ -275,7 +258,7 @@ export default function SecurityClusteringApp() {
               </CardHeader>
               <CardContent>
                 <div className="flex flex-wrap gap-2">
-                  {['Firewall', 'IPS/IDS', 'DDoS Protection', 'WAF', 'Web Filter', 
+                  {['Firewall', 'IPS/IDS', 'DDoS Protection', 'WAF', 'Web Filter',
                     'Mail Protection', 'VPN', 'Proxy', 'DNS Security', 'Antivirus',
                     'Sandbox', 'DLP', 'NAT', 'Router', 'Authentication'].map(sys => (
                     <Badge key={sys} variant="outline">{sys}</Badge>
@@ -286,7 +269,6 @@ export default function SecurityClusteringApp() {
           </div>
         )}
 
-        {/* Configuration State */}
         {state === 'configuring' && (
           <div className="max-w-4xl mx-auto space-y-6">
             <Button
@@ -300,8 +282,7 @@ export default function SecurityClusteringApp() {
             >
               ← Back
             </Button>
-            
-            {/* File Upload Section - Allow changing file */}
+
             <div>
               <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
                 <span>Step 1: Upload Event Log File</span>
@@ -309,15 +290,14 @@ export default function SecurityClusteringApp() {
                   <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">✓ Uploaded</span>
                 )}
               </h3>
-              <EventLogUpload 
+              <EventLogUpload
                 onEventsLoaded={(events, filename) => {
                   setLoadedEvents(events)
                   setUploadedFilename(filename)
                 }}
               />
             </div>
-            
-            {/* Training Config */}
+
             {uploadedFilename && (
               <div>
                 <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
@@ -334,14 +314,12 @@ export default function SecurityClusteringApp() {
           </div>
         )}
 
-        {/* Training State */}
         {state === 'training' && progress && (
           <div className="max-w-2xl mx-auto">
             <TrainingProgress progress={progress} />
           </div>
         )}
 
-        {/* Error State */}
         {state === 'error' && (
           <div className="max-w-md mx-auto">
             <Card className="border-destructive">
@@ -361,10 +339,8 @@ export default function SecurityClusteringApp() {
           </div>
         )}
 
-        {/* Results State */}
         {state === 'completed' && results && (
           <div className="space-y-6">
-            {/* Summary Cards */}
             <div className="grid gap-4 md:grid-cols-4">
               <Card>
                 <CardHeader className="pb-2">
@@ -396,7 +372,6 @@ export default function SecurityClusteringApp() {
               </Card>
             </div>
 
-            {/* Intrinsic Clustering Metrics */}
             <div className="grid gap-4 md:grid-cols-3">
               <Card>
                 <CardHeader className="pb-2">
@@ -424,7 +399,6 @@ export default function SecurityClusteringApp() {
               </Card>
             </div>
 
-            {/* Main Results */}
             <Tabs defaultValue="insights" className="space-y-4">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="insights">Security Insights</TabsTrigger>
@@ -449,7 +423,6 @@ export default function SecurityClusteringApp() {
 
               <TabsContent value="threats">
                 <div className="grid gap-4 md:grid-cols-2">
-                  {/* Top Threat Indicators */}
                   <Card>
                     <CardHeader>
                       <CardTitle className="text-base">Top Threat Indicators</CardTitle>
@@ -466,7 +439,6 @@ export default function SecurityClusteringApp() {
                     </CardContent>
                   </Card>
 
-                  {/* Critical Clusters */}
                   <Card className="border-red-500/50">
                     <CardHeader>
                       <CardTitle className="text-base flex items-center gap-2">
@@ -496,7 +468,7 @@ export default function SecurityClusteringApp() {
                               )}
                             </div>
                           ))}
-                        {results.clusters.filter(c => 
+                        {results.clusters.filter(c =>
                           c.threat_level === 'critical' || c.threat_level === 'high'
                         ).length === 0 && (
                           <div className="text-center py-4 text-muted-foreground">
