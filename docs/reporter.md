@@ -1,0 +1,649 @@
+# Project Reporter: Architecture, API, Classes, and Functions
+
+This document describes the **Security Event Deep Clustering** codebase: system layout, HTTP API contracts, major classes, and important functions with parameters, behavior, and call flow. Paths are relative to the repository root.
+
+---
+
+## 1. High-level architecture
+
+### 1.1 Components
+
+| Layer | Location | Role |
+|--------|-----------|------|
+| API gateway | `backend/main.py` | FastAPI app mounted at `/api`; CORS; job orchestration; insight endpoints |
+| Featurization | `backend/event_parser.py` | Parse `key=value` logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
+| Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive modules and loss helpers |
+| Training & metrics | `backend/trainer.py` | `DeepClusteringTrainer`, `TrainingConfig`, `ClusteringMetrics`, latent refinement |
+| Cluster narratives | `backend/cluster_analyzer.py` | `ClusterProfile`, per-cluster stats, summaries |
+| SOC intelligence | `backend/security_insights.py` | `SecurityInsightsEngine`, MITRE-style insights, correlations |
+| Frontend client | `frontend/lib/api.ts` | Typed fetch wrappers to `http://localhost:8000/api` |
+
+### 1.2 Process layout
+
+- **`app`** (`FastAPI`): all routes below are prefixed with **`/api`** when using `root_app` (uvicorn entry is typically `root_app` on port 8000).
+- **In-memory state**: `training_jobs[job_id]` (dict progress), `trained_models[job_id]` (trained `trainer`, events, labels, latent, profiles, normalization stats).
+- **Training** runs as a **background task**: `delayed_training` → `run_training` (async), so `/train` returns immediately with `job_id`.
+
+### 1.3 End-to-end flow (code inspection)
+
+1. Client **POST `/api/train`** with raw event strings → job queued → `run_training` parses via `parse_events_to_features` → `DeepClusteringTrainer.pretrain` → `initialize_clusters` → `finetune` → `predict` + `get_latent_representations` → `refine_cluster_assignments` → `analyze_clusters_from_results` → `trained_models[job_id]` populated.
+2. Client **GET `/api/train/{job_id}`** polls `training_jobs[job_id]` until `status == "completed"`.
+3. Client **GET `/api/results/{job_id}`** loads profiles and recomputes intrinsic metrics on latent vectors.
+
+---
+
+## 2. HTTP API reference
+
+Base URL (default): `http://localhost:8000/api`
+
+### 2.1 Summary table
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Service and device probe |
+| GET | `/models` | List model types |
+| POST | `/train` | Start training job |
+| GET | `/train/{job_id}` | Training status / progress |
+| GET | `/results/{job_id}` | Full analysis + metrics + 2D latent plot data |
+| POST | `/predict` | Cluster new events with saved model |
+| GET | `/cluster-events/{job_id}/{cluster_id}` | Paginated events in one cluster |
+| POST | `/analyze` | Ad-hoc batch vs trained profiles |
+| GET | `/demo` | Sample event strings |
+| POST | `/upload` | Upload log file → event list |
+| DELETE | `/job/{job_id}` | Remove job and cached model |
+| GET | `/insights/{job_id}` | Full insights + correlations + summaries |
+| GET | `/insights/{job_id}/cluster/{cluster_id}` | One cluster’s insights |
+| GET | `/insights/{job_id}/iocs` | IOC-style extract |
+| GET | `/insights/{job_id}/mitre` | MITRE-oriented mapping |
+
+### 2.2 `GET /health`
+
+- **Request**: none.
+- **Response** (JSON):
+  - `status` — e.g. `"healthy"`.
+  - `timestamp` — ISO8601 string.
+  - `cuda_available` — boolean.
+  - `device` — `"cuda"` or `"cpu"`.
+
+### 2.3 `GET /models`
+
+- **Request**: none.
+- **Response**: `{ "models": [ { "id", "name", "description" }, ... ] }`  
+  - `id`: `dec` | `idec` | `vade` | `contrastive`.
+
+### 2.4 `POST /train`
+
+- **Request body** (`TrainingRequest`):
+  - `events` (string[], required) — raw lines; **minimum 100** events.
+  - `model_type` — `dec` | `idec` | `vade` | `contrastive` (default `idec`).
+  - `n_clusters` (int, 2–100) — must satisfy `n_clusters <= len(events) // 10`.
+  - `latent_dim` (int, 8–256).
+  - `hidden_dims` (int[]) — encoder/decoder widths.
+  - `pretrain_epochs`, `finetune_epochs`, `batch_size`, `learning_rate`.
+- **Response**: `{ "job_id": "<uuid>", "message": "Training started" }`.
+- **Errors**: `400` with `detail` if validation fails.
+
+### 2.5 `GET /train/{job_id}`
+
+- **Request**: path `job_id`.
+- **Response**: dict (job state). Aligns with `TrainingProgress` plus extra keys:
+  - Core: `job_id`, `status` (`queued` | `parsing` | `training` | `completed` | `failed`), `progress` (0–100), `stage` (`pretraining` | `initialization` | `fine-tuning` | `postprocessing`, etc.), `stage_progress`, `current_epoch`, `total_epochs`, `stage_epoch`, `stage_total_epochs`, `current_loss`, `metrics`, `message`, `stages_completed`.
+  - Often present: `model_type`, `n_events`, `n_clusters`, `created_at`.
+  - After completion: `refinement` may mirror refinement info (`applied`, `method`, `elapsed_seconds`, `time_budget_hit`, etc.).
+- **Errors**: `404` if unknown `job_id`.
+
+### 2.6 `GET /results/{job_id}`
+
+- **Request**: path `job_id`.
+- **Response** (`AnalysisResponse`):
+  - `total_events`, `n_clusters`.
+  - `clusters`: array of `ClusterResult` (see §3.2).
+  - `summary`: dict from `ClusterAnalyzer.generate_cluster_summary` (threat distribution, critical/high cluster ids, top indicators, sizes, etc.).
+  - `intrinsic_metrics`: Silhouette, Davies–Bouldin, Calinski–Harabasz, cluster counts/sizes, etc., or null if not computable.
+  - `latent_visualization`: `{ "points": [{ "x", "y", "cluster" }], "explained_variance": number[] }` (PCA-2D).
+- **Errors**: `400` if training not completed; `404` if no results.
+
+### 2.7 `POST /predict`
+
+- **Request** (`PredictRequest`): `job_id`, `events` (string[]).
+- **Response**: `{ "predictions": [ { "event_index", "cluster_id", "confidence", "probabilities", "event_summary" }, ... ] }`  
+  - `probabilities`: per-cluster soft scores (list of float).  
+  - `event_summary`: subset of parsed fields.
+- **Note**: Features are normalized with **batch** mean/std of the provided events (same helper as training path for new data).
+- **Errors**: `404` if job/model missing.
+
+### 2.8 `GET /cluster-events/{job_id}/{cluster_id}`
+
+- **Query**: `page` (default 1), `limit` (default 30, max 100).
+- **Response**: `job_id`, `cluster_id`, `total_events`, `page`, `limit`, `total_pages`, `events` (array of lightweight event dicts with `index`, `timestamp`, IPs, `dest_port`, `subsystem`, `action`, `severity`, `content`).
+- **Errors**: `400` bad pagination; `404` unknown job or empty cluster.
+
+### 2.9 `POST /analyze`
+
+- **Request** (`AnalyzeRequest`): `job_id`, `events`.
+- **Response**: `total_events`, `clusters_found`, `cluster_insights` (list with `cluster_id`, `event_count`, `threat_level`, indicators, recommendations, `matches_known_pattern`, optional `known_pattern_info`), `summary`, `high_priority_clusters` (threat `critical` or `high`).
+- **Errors**: `404` if model missing.
+
+### 2.10 `GET /demo`
+
+- **Response**: `sample_events`, `total_samples`, `note`.
+
+### 2.11 `POST /upload`
+
+- **Request**: `multipart/form-data` with `file` (`.txt`, `.csv`, `.json` / JSONL).
+- **Response** (`FileUploadResponse`): `filename`, `total_events`, `events` (full list as strings), `format_detected`, `sample_events`, `errors`.
+- **Errors**: `400` for empty/invalid files.
+
+### 2.12 `DELETE /job/{job_id}`
+
+- **Response**: `{ "message": "Job deleted successfully" }`.
+- **Errors**: `404` if nothing deleted.
+
+### 2.13 `GET /insights/{job_id}`
+
+- **Response** (`FullInsightsResponse`-shaped JSON): `job_id`, `total_events`, `total_clusters`, `insights` (list of insight objects), `correlations`, `executive_summary`, `threat_landscape`.
+- **Errors**: `400` / `404` if job incomplete or missing.
+
+### 2.14 `GET /insights/{job_id}/cluster/{cluster_id}`
+
+- **Response**: `cluster_id`, `event_count`, `profile` (nullable cluster profile dict), `insights`, `risk_assessment`, `sample_events`.
+- **Errors**: `404` if cluster empty / missing.
+
+### 2.15 `GET /insights/{job_id}/iocs`
+
+- **Response**: IOC aggregation: `malicious_ips`, `attack_patterns`, `suspicious_users`, `firewall_rules`, counts, `generated_at`, etc.
+- **Errors**: `404` if model missing.
+
+### 2.16 `GET /insights/{job_id}/mitre`
+
+- **Response**: `tactics_coverage`, `techniques_detected`, counts, `kill_chain_analysis`, `coverage_assessment`, `mitigation_priorities`.
+- **Errors**: `404` if model missing.
+
+---
+
+## 3. API schema classes (Pydantic / dataclasses used in API)
+
+These are defined in `backend/main.py` unless noted.
+
+### 3.1 `ModelTypeEnum`
+
+- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE` → serialized as lowercase strings for JSON.
+
+### 3.2 `TrainingRequest`
+
+- Fields listed in §2.4. Used only as request body validation.
+
+### 3.3 `PredictRequest` / `AnalyzeRequest`
+
+- `job_id: str`, `events: list[str]`.
+
+### 3.4 `TrainingProgress`
+
+- Documented fields in §2.5. Actual runtime dict may include additional keys written in `run_training`.
+
+### 3.5 `ClusterResult`
+
+- `cluster_id`, `size`, `threat_level`, `primary_subsystems`, `primary_actions`, `threat_indicators`, `recommended_actions`, `top_source_ips`, `top_dest_ports`, `representative_events`.
+
+### 3.6 `AnalysisResponse`
+
+- Top-level analysis payload for `/results/{job_id}` (§2.6).
+
+### 3.7 `FileUploadResponse`
+
+- File upload outcome (§2.11).
+
+### 3.8 Insight-related response models
+
+- `InsightResponse`, `CorrelationResponse`, `FullInsightsResponse` — mirror structures returned by `get_security_insights` and related helpers.
+
+---
+
+## 4. Core orchestration functions (`backend/main.py`)
+
+### 4.1 `parse_events_to_features(raw_events: list[str]) -> tuple[list[SecurityEvent], np.ndarray]`
+
+- **Purpose**: Single entry for “strings → model input matrix”.
+- **Parameters**: `raw_events` — list of raw log lines.
+- **Behavior**: `parser.parse_events` → `event_to_features` per event → `np.float32` array → **per-column z-score** using this batch’s mean/std ($\epsilon=10^{-8}$).
+- **Returns**: Parsed events and normalized feature matrix `X`.
+- **Flow**: Called from `run_training`, `predict_clusters`, `analyze_events`, and any path that scores new data.
+
+### 4.2 `run_training(job_id, raw_events, config, model_type)`
+
+- **Purpose**: Full training pipeline for one job; updates `training_jobs[job_id]` throughout.
+- **Parameters**:
+  - `job_id` — UUID string.
+  - `raw_events` — training corpus.
+  - `config` — `TrainingConfig` dataclass.
+  - `model_type` — `trainer.ModelType` enum.
+- **Flow**:
+  1. `parsing` → `parse_events_to_features` (on failure: `failed` + message, return).
+  2. Build `DeepClusteringTrainer(input_dim, model_type, config)`.
+  3. `pretraining` — async `pretrain_callback` updates epoch loss and progress (~0–50% overall).
+  4. `initialization` — `initialize_clusters`; `init_callback` maps 0–100% stage to ~50–75% overall.
+  5. `fine-tuning` — `finetune` with metric callback; overall progress uses same band as callback implementation.
+  6. `postprocessing` — `predict` → `get_latent_representations` → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` → `get_cluster_probabilities`.
+  7. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`.
+  8. Mark `completed`, final `ClusteringMetrics.compute_all` on refined labels + latent.
+- **Callbacks**: `refine_progress_callback` updates `stage_progress` and overall `progress` (95–100%), logs to stdout, `await asyncio.sleep(0.05)` for event-loop yield.
+
+### 4.3 `delayed_training(job_id, events, config, model_type)`
+
+- **Purpose**: `asyncio.sleep(2)` then `await run_training(...)`. Decouples HTTP response from immediate CPU spike.
+
+### 4.4 Private helpers (insights / MITRE)
+
+- `_generate_threat_landscape`, `_calculate_cluster_risk`, `_generate_firewall_rules`, `_analyze_kill_chain`, `_assess_mitre_coverage`, `_generate_mitre_mitigations` — build nested dicts for insight endpoints; parameters are insight lists, event groupings, or tactic/technique maps.
+
+---
+
+## 5. Training configuration and metrics (`backend/trainer.py`)
+
+### 5.1 `ModelType` (Enum)
+
+- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE` (string values match API).
+
+### 5.2 `TrainingConfig` (dataclass)
+
+- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC `alpha`, `gamma`, `update_interval`, `tol`, VaDE `beta`, contrastive `temperature`, `weight_decay`, `device`.
+- **`__post_init__`**: default `hidden_dims` to `[256, 128, 64]` if `None`.
+
+### 5.3 `ClusteringMetrics`
+
+- **Method**: `compute_all(labels_pred, labels_true=None, features=None) -> dict`
+  - **Parameters**: `labels_pred` — required; `labels_true` — optional for NMI/ARI; `features` — typically latent matrix for Silhouette/DBI/CH.
+  - **Returns**: floats for metrics where defined; `n_clusters_found`, `cluster_sizes`, `size_std`, `size_min`, `size_max`.
+
+### 5.4 `DeepClusteringTrainer`
+
+#### Instance variables
+
+- `input_dim`, `model_type`, `config`, `device`, `model` (nn.Module), `history` (loss/metric lists), `is_pretrained`, `is_clusters_initialized`.
+
+#### Methods (public / important)
+
+| Method | Parameters | Role / flow |
+|--------|------------|-------------|
+| `__init__` | `input_dim`, `model_type`, `config` | `_create_model()`, move to device |
+| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or contrastive pretrain; updates `history` |
+| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; contrastive path has multi-init K-means with progress |
+| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, metrics)` | Main clustering loop; DEC/IDEC target distribution; periodic `_evaluate` |
+| `refine_cluster_assignments` | `latent`, `initial_labels`, optional hyperparams, async `progress_callback` | Scaled latent; K-means/GMM/agglomerative trials; sampled Silhouette; time budget; returns best labels + info dict |
+| `predict` | `data` | Hard labels from model soft assignments |
+| `get_cluster_probabilities` | `data` | Soft assignment matrix |
+| `get_latent_representations` | `data` | Encoder outputs $z$ |
+| `get_cluster_centers` | — | DEC/IDEC/VaDE centers if defined |
+| `save_model` / `load_model` | path | Torch checkpoint |
+
+#### Private helpers
+
+- `_create_model`, `_pretrain_contrastive`, `_compute_target_distribution`, `_vade_loss`, `_evaluate`.
+
+---
+
+## 6. Deep clustering modules (`backend/deep_clustering.py`)
+
+### 6.1 Module-level loss functions
+
+| Function | Parameters | Meaning |
+|----------|------------|---------|
+| `reconstruction_loss` | `x`, `x_recon` | MSE reconstruction |
+| `kl_divergence_loss` | `q`, `p` | KL for DEC target distribution |
+| `vae_loss` | `x`, `x_recon`, `mu`, `logvar`, `beta` | ELBO-style loss |
+| `cluster_assignment_entropy` | `q` | Entropy regularizer for soft assignments |
+
+### 6.2 `BaseAutoEncoder` (ABC)
+
+- **Abstract**: `encode`, `decode`; **`forward`**: returns `(z, x_recon)`.
+
+### 6.3 `SecurityEventAutoEncoder`
+
+- **Members**: `input_dim`, `hidden_dims`, `latent_dim`, `activation`, `encoder` (`Sequential`), `decoder` (`Sequential`).
+- **Methods**: `encode`, `decode`, `forward`.
+
+### 6.4 `VariationalAutoEncoder`
+
+- **Members**: `encoder_base`, `fc_mu`, `fc_logvar`, `decoder`, `training_mode`.
+- **Methods**: `reparameterize`, `encode` (sampling), `encode_with_params`, `decode`, `forward` (returns z, recon, mu, logvar).
+
+### 6.5 `ClusteringLayer`
+
+- **Members**: `n_clusters`, `alpha`, `cluster_centers` (`nn.Parameter`).
+- **Methods**: `forward` (Student-t soft assignments `q`), `get_target_distribution` (sharpened `p`).
+
+### 6.6 `DeepEmbeddedClustering`
+
+- **Members**: `autoencoder`, `clustering_layer`, `n_clusters`, `latent_dim`.
+- **Methods**: `encode`, `forward` → `(q, z, x_recon)`, `initialize_clusters` (K-means on latent to set centers).
+
+### 6.7 `ImprovedDEC`
+
+- **Members**: `dec` (nested `DeepEmbeddedClustering`), `gamma`.
+- **Methods**: delegate `forward`, `encode`, `initialize_clusters`; `clustering_layer` / `autoencoder` properties.
+
+### 6.8 `VaDE`
+
+- **Members**: `vae`, `pi`, `mu_c`, `logvar_c`, `n_clusters`, `latent_dim`.
+- **Methods**: `forward` → z, recon, mu, logvar, `gamma`; `get_gamma`; `encode`; `initialize_gmm` (K-means + variance/mixture init).
+
+### 6.9 `ContrastiveDeepClustering`
+
+- **Members**: `encoder` (subset of autoencoder), `projection_head`, `cluster_head`, `n_clusters`, `temperature`.
+- **Methods**: `encode`, `forward` → `(z, proj, cluster_prob)`, `contrastive_loss(proj1, proj2)` (NT-Xent-style).
+
+---
+
+## 7. Event parsing (`backend/event_parser.py`)
+
+### 7.1 `SecurityEvent` (dataclass)
+
+- **Core**: `timestamp`, `source_ip`, `dest_ip`, `dest_port`, `source_port`, `subsystem`, `user`, `action`, `severity`, `content`, `protocol`, `raw_data`.
+- **Subsystem-specific**: WAF/webfilter (`url`, `response_code`, `reason`, …), IPS (`rule_id`, `rule_name`, `attack_type`), VPN, mail/DLP, proxy, DNS, AV/sandbox, DDoS, firewall zones/policy, etc. (see class body).
+
+### 7.2 `EventParser`
+
+#### Class-level data
+
+- `FIELD_MAPPINGS`, `SUBSYSTEM_FIELD_MAPPINGS`, `KNOWN_SUBSYSTEMS`, `KNOWN_ACTIONS`, `SEVERITY_LEVELS`, `CONTENT_KEYWORD_GROUPS`, compiled regex patterns.
+
+#### Methods
+
+| Method | Parameters | Purpose / flow |
+|--------|------------|----------------|
+| `parse_event` | `raw_event: str` | Regex key=value scan; subsystem detection; fills `SecurityEvent` |
+| `parse_events` | `raw_events: list[str]` | List comprehension over `parse_event` |
+| `_set_subsystem_field` | `event`, `field_name`, `value`, `subsystem` | Typed assignment for extended fields |
+| `_is_float` | `value: str` | Parse guard |
+| `_stable_hash_to_unit` | `value: str`, `modulo: int` | MD5 bucket → $[0,1]$ for stable categoricals |
+| `ip_to_features` | `ip: str` | Octets + private flag (5 dims) |
+| `port_to_features` | `port: int` | Normalized port + category flags (4 dims) |
+| `subsystem_to_features` | `subsystem: str` | Multi-label-style over known list (15 dims) |
+| `action_to_features` | `action: str` | Block/allow/alert/other (4 dims) |
+| `severity_to_feature` | `severity: str` | Single scalar |
+| `timestamp_to_features` | `timestamp: str` | Cyclic hour sin/cos, DOW, business hours (4 dims) |
+| `content_to_features` | `content: str` | Keyword groups + token + punctuation density |
+| `event_to_features` | `event: SecurityEvent` | Concatenates all blocks + `_extract_subsystem_features` |
+| `_extract_subsystem_features` | `event` | Up to 12 dims, padded |
+| `get_feature_dim` | — | Returns `70` |
+
+---
+
+## 8. Cluster analysis (`backend/cluster_analyzer.py`)
+
+### 8.1 `ClusterProfile` (dataclass)
+
+- **Fields**: `cluster_id`, `size`, `primary_subsystems`, `primary_actions`, `severity_distribution`, `top_source_ips`, `top_dest_ips`, `top_dest_ports`, `peak_hours`, `weekend_ratio`, `business_hours_ratio`, `top_users`, `has_user_ratio`, `content_keywords`, `threat_level`, `threat_indicators`, `recommended_actions`, `representative_events`.
+
+### 8.2 `ClusterAnalyzer`
+
+- **Class constants**: `SUSPICIOUS_PORTS`, `THREAT_KEYWORDS`.
+- **Instance**: `parser: EventParser`.
+- **Methods**:
+  - `analyze_cluster(events, cluster_id, latent_centroid=None)` — aggregates counters, content tokens, threat assessment, representatives → `ClusterProfile`.
+  - `generate_cluster_summary(profiles)` — dataset-level summary dict.
+- **Private**: `_assess_threat`, `_assess_subsystem_threats`, `_generate_recommendations`, `_select_representatives`.
+
+### 8.3 `analyze_clusters_from_results(events, labels, latent_features=None)`
+
+- **Purpose**: Stateless convenience wrapper: groups by label, optional latent centroid per cluster, `analyze_cluster` per id, then `generate_cluster_summary`.
+- **Returns**: `(list[ClusterProfile], summary_dict)`.
+
+---
+
+## 9. Security insights (`backend/security_insights.py`)
+
+### 9.1 Dataclasses
+
+- **`AttackPattern`**: `pattern_id`, `pattern_name`, `description`, `confidence`, MITRE lists, `indicators`, `affected_assets`, `timeline`, `severity`.
+- **`ThreatActor`**: `actor_id`, `source_ips`, `behavior_type`, timelines, `targeted_systems`, `techniques_used`, `risk_score`.
+- **`AnomalyScore`**: scalar subscores + `reasons`.
+- **`SecurityInsight`**: `insight_id`, `category`, `title`, `description`, `severity`, `confidence`, evidence fields, MITRE fields, recommendations, `ioc_indicators`, etc.
+- **`ClusterCorrelation`**: `cluster_a`, `cluster_b`, `correlation_type`, `correlation_strength`, `shared_indicators`, `description`.
+
+### 9.2 `SecurityInsightsEngine`
+
+- **Class data**: `MITRE_MAPPINGS`, `SUSPICIOUS_PORTS`, `PRIVATE_RANGES`.
+- **Instance lists**: `insights`, `attack_patterns`, `threat_actors`, `correlations` (mutable caches during analysis).
+
+**Public methods**
+
+- `analyze_cluster_insights(cluster_id, events, latent_features=None) -> list[SecurityInsight]` — orchestrates stats collection, attack pattern detectors, policy/anomaly/recon/exfil heuristics, sample events.
+- `find_cluster_correlations(profiles, events_by_cluster)` — cross-cluster correlation objects.
+- `generate_executive_summary(insights, n_clusters, total_events)` — overview dict for API.
+
+**Private detectors (representative)**  
+`_collect_cluster_stats`, `_detect_attack_patterns`, `_is_brute_force`, `_create_brute_force_insight`, analogous `_is_web_attack`, `_is_ddos`, `_is_malware_c2`, policy and anomaly helpers, `_get_sample_events`, `_generate_priorities`, etc. Each `_create_*` builds one or more `SecurityInsight` instances from aggregated `stats`.
+
+---
+
+## 10. Frontend API layer (`frontend/lib/api.ts`)
+
+- **Constants**: `API_BASE = 'http://localhost:8000/api'`.
+- **Interfaces**: `TrainingRequest`, `TrainingProgress`, `SecurityEvent`, `ClusterResult`, `FileUploadResponse`, `AnalysisResponse`, plus extended types for insights, IOCs, MITRE (`InsightsResponse`, `IOCsResponse`, `MITREResponse`, etc.).
+- **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping` — each maps to the corresponding REST path documented in §2.
+
+---
+
+## 11. Quick reference: `trained_models[job_id]` payload
+
+| Key | Type / meaning |
+|-----|----------------|
+| `trainer` | `DeepClusteringTrainer` instance |
+| `events` | List of `SecurityEvent` used for training |
+| `features` | Normalized numpy training matrix |
+| `labels` | Final integer labels (after refinement) |
+| `latent` | Latent matrix $Z$ |
+| `probs` | Soft assignment matrix |
+| `refinement_info` | Dict from `refine_cluster_assignments` (silhouette before/after, applied flag, method, timing, etc.) |
+| `profiles` | `list[ClusterProfile]` |
+| `summary` | Summary dict |
+| `feature_mean`, `feature_std` | Vectors used conceptually for consistent normalization (training batch stats) |
+
+---
+
+## 12. Frontend UI components, workflow, interactions, and event handling
+
+This section documents the **Next.js** frontend under `frontend/`: layout, the main page state machine, child components, user-driven events, and how they call `frontend/lib/api.ts`.
+
+### 12.1 Technology stack and entry points
+
+| Item | Location | Notes |
+|------|-----------|--------|
+| App shell | `frontend/app/layout.tsx` | Server component: `metadata`, Google fonts (`Inter`, `JetBrains_Mono`), `className="dark"` on `<html>`, global `globals.css`. |
+| Main UI | `frontend/app/page.tsx` | `"use client"` — all interactive logic and API polling live here. |
+| API client | `frontend/lib/api.ts` | `fetch` wrappers; base URL `http://localhost:8000/api`. |
+| Shared UI | `frontend/components/ui/*` | shadcn-style primitives (`Button`, `Card`, `Tabs`, `Badge`, `Progress`, `ScrollArea`, `Slider`, `Select`, `Tooltip`, etc.). |
+
+### 12.2 Application state machine (`AppState`)
+
+The root component `SecurityClusteringApp` uses:
+
+`type AppState = 'idle' | 'configuring' | 'training' | 'completed' | 'error'`
+
+| State | When set | Primary UI |
+|--------|-----------|------------|
+| `idle` | Initial; after reset | Hero, feature cards, subsystem badges; **Get Started** (disabled if backend offline). |
+| `configuring` | User clicks Get Started | **Back** clears upload metadata; **EventLogUpload**; after upload, **TrainingConfig**. |
+| `training` | After `startTraining` succeeds | **TrainingProgress** (requires `progress` object from first poll). |
+| `completed` | Poll sees `status === 'completed'` and `getResults` succeeds | Summary metrics, intrinsic metric cards, tabbed results. |
+| `error` | `startTraining` throws, or poll sees `failed`, or other hard failures | Error card + **Try Again** (`handleReset`). |
+
+### 12.3 Root component state variables (`page.tsx`)
+
+| State | Type | Purpose |
+|-------|------|---------|
+| `state` | `AppState` | Drives which main block renders. |
+| `backendStatus` | `'checking' \| 'online' \| 'offline'` | Header badge; from `checkHealth()` on mount. |
+| `deviceInfo` | `string` | e.g. `cpu` / `cuda` from health response. |
+| `sampleEvents` | `string[]` | Loaded from `getDemoEvents()` (available for future use; primary path is file upload). |
+| `loadedEvents` | `string[]` | Events passed from upload into `TrainingConfig`. |
+| `uploadedFilename` | `string` | Shown as “uploaded”; gating Step 2. |
+| `jobId` | `string \| null` | Returned by `POST /train`; triggers polling. |
+| `progress` | `TrainingProgress \| null` | Latest job status from `getTrainingStatus`. |
+| `results` | `AnalysisResponse \| null` | From `getResults(jobId)` when training completes. |
+| `insights` | `InsightsResponse \| null` | From `getSecurityInsights(jobId)` after results. |
+| `insightsLoading` | `boolean` | While insights request in flight. |
+| `error` | `string \| null` | User-visible error message. |
+
+### 12.4 Effects and async workflow
+
+**Mount (`useEffect`, empty deps)**
+
+1. `checkHealth()` → on success: `backendStatus = 'online'`, `deviceInfo = health.device`.
+2. `getDemoEvents()` → `setSampleEvents(demo.sample_events)`.
+3. On failure: `backendStatus = 'offline'` (demo load skipped if health throws).
+
+**Training poll (`useEffect` deps: `[jobId, state]`)**
+
+Runs only when `jobId` is set **and** `state === 'training'`.
+
+1. **Concurrency guard**: `isPolling` flag avoids overlapping polls.
+2. **Abort**: creates `AbortController` per tick; passes `signal` to `getTrainingStatus(jobId, signal)` so an in-flight request is aborted when the effect cleans up or a new tick starts.
+3. **Interval**: `setInterval(poll, 1500)` plus **immediate** `poll()` on subscribe.
+4. **On `status === 'completed'`**: `getResults(jobId)` → `setResults`, `setState('completed')`; then `getSecurityInsights(jobId)` with `insightsLoading` true/false (errors logged, non-fatal).
+5. **On `status === 'failed'`**: `setError(status.message)`, `setState('error')`.
+6. **Fetch errors**: `AbortError` ignored; others `console.error`.
+7. **Cleanup**: `clearInterval`, `abortController.abort()`.
+
+### 12.5 Root-level event handlers
+
+| Handler | Trigger | Behavior |
+|---------|---------|----------|
+| `handleStartTraining(config)` | `TrainingConfig` submit | Clears error/results; `setState('training')`; `startTraining(config)` → `setJobId(job_id)`; on catch sets error + `error` state. |
+| `handleReset` | **New Analysis** / **Try Again** | Resets to `idle`, clears `jobId`, `progress`, `results`, `insights`, loading, `error`. |
+| `formatMetric(value)` | Render intrinsic metrics | Returns `'N/A'` if undefined, negative, or NaN; else fixed decimals. |
+| Inline **Get Started** | Button click | `setState('configuring')` (disabled when backend not online). |
+| Inline **Back** (configuring) | Button click | `setState('idle')`, clear `loadedEvents`, `uploadedFilename`. |
+
+### 12.6 `EventLogUpload` (`frontend/components/event-log-upload.tsx`)
+
+**Props**
+
+- `onEventsLoaded?: (events: string[], filename: string) => void` — parent stores corpus + filename.
+
+**Local state**
+
+- `uploading`, `uploadResult`, `error`; `fileInputRef` for resetting input.
+
+**Interactions**
+
+| Event | Handler | Flow |
+|-------|-----------|------|
+| File chosen | `handleFileSelect` (`ChangeEvent<HTMLInputElement>`) | `uploadEventLog(file)` → `setUploadResult`; call `onEventsLoaded(result.events, result.filename)`; clear input value in `finally`. |
+| Drag over | `handleDragOver` | `preventDefault` / `stopPropagation` so drop works. |
+| Drop | `handleDrop` (`DragEvent`) | Same API path as file select for `files[0]`. |
+| Tabs | Radix `Tabs` | **Upload File** vs **Supported Formats** (static help). |
+
+### 12.7 `TrainingConfig` (`frontend/components/training-config.tsx`)
+
+**Props**
+
+- `onSubmit(config: TrainingRequest)`, `isLoading`, optional `sampleEvents`, `preloadedEvents`, `preloadedFilename`.
+
+**Local state**
+
+- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType`, `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
+
+**Validation**
+
+- `eventLines = events.trim().split('\n').filter(...)`; `eventCount >= 100` **and** `preloadedFilename` required for `isValid` (matches backend minimum event rule).
+
+**Submit (`handleSubmit`)**
+
+Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp(floor(eventCount/10), 32, 256)`, `learning_rate: 0.001`, plus UI-controlled fields → `onSubmit(config)`.
+
+**UI**
+
+- Model `Select`, sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
+
+### 12.8 `TrainingProgress` (`frontend/components/training-progress.tsx`)
+
+**Props**
+
+- `progress: TrainingProgress` (from API).
+
+**Behavior**
+
+- Animated progress bar synced to `progress.progress` via short timeout.
+- Stage checklist: pretraining, initialization, fine-tuning, **Refining cluster assignments** (`stage === 'postprocessing'` shows dedicated bar and percent).
+- Shows epoch, loss, stage; optional `metrics` preview (e.g. silhouette); spinner when status is training-like.
+
+### 12.9 `ClusterVisualization` (`frontend/components/cluster-visualization.tsx`)
+
+**Props**
+
+- `data: AnalysisResponse`.
+
+**Behavior**
+
+- `useMemo` transforms: PCA scatter from `latent_visualization.points`, threat pie/bar data from `summary.threat_distribution`, cluster sizes, subsystem aggregation.
+- Renders **Recharts** (`ScatterChart`, `PieChart`, `BarChart`, etc.) inside `Card` components — read-only; no custom mouse handlers beyond library tooltips.
+
+### 12.10 `ClusterDetails` (`frontend/components/cluster-details.tsx`)
+
+**Props**
+
+- `clusters: ClusterResult[]`, optional `jobId` (required for paginated API fetch).
+
+**Structure**
+
+- `ClusterCard` per cluster: expand/collapse (`isExpanded`), threat badge, summary fields.
+
+**Lazy loading and scroll**
+
+- On first expand with `jobId`: `getClusterEvents(jobId, cluster_id, page=1, PAGE_SIZE=30)`.
+- Further pages appended on scroll: `useEffect` attaches listener to Radix ScrollArea viewport; near-bottom triggers `loadPage(currentPage + 1)` until `totalPages`.
+- On fetch error page 1: fallback to `cluster.representative_events`.
+
+**Other interactions**
+
+- Buttons for expand chevron; optional external links if present in UI for artifacts.
+
+### 12.11 `SecurityInsights` (`frontend/components/security-insights.tsx`)
+
+**Props**
+
+- `data: InsightsData | null` (local interface mirroring API), `loading: boolean`.
+
+**State**
+
+- `selectedInsight`, `activeTab` (`overview`, etc.).
+
+**Behavior**
+
+- Loading skeleton when `loading && !data`.
+- Tabbed sections: executive summary, insight list, correlations, threat landscape — driven by `data.insights`, `correlations`, `executive_summary`, `threat_landscape`.
+- Clicking an insight sets `selectedInsight` for detail panes (pattern varies by tab implementation).
+
+### 12.12 Results view composition (`state === 'completed'`)
+
+- **Summary row**: total events, clusters, critical/high counts from `results.summary`.
+- **Intrinsic row**: Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)`.
+- **Tabs** (`defaultValue="insights"`):
+  - **Security Insights** → `SecurityInsights` with `insights` + `insightsLoading`.
+  - **Visualization** → `ClusterVisualization data={results}`.
+  - **Cluster Details** → scrollable `ClusterDetails` with `jobId`.
+  - **Threat Analysis** → inline cards (top indicators, priority clusters filtered by threat level).
+
+### 12.13 End-to-end user journey (sequence)
+
+1. User opens app → health check + demo samples loaded.
+2. **Get Started** → configuring.
+3. User uploads file → `onEventsLoaded` → parent stores events + filename → Step 2 appears.
+4. User adjusts model/hyperparameters → **Start Training** → `handleStartTraining` → API returns `job_id`.
+5. Poll loop updates progress until complete → results + insights fetched.
+6. User explores tabs / expands clusters / scrolls event pages.
+7. **New Analysis** → reset to idle.
+
+### 12.14 Error handling and edge cases
+
+- **Backend offline**: training entry disabled; badge shows offline.
+- **Training start failure**: message from thrown `Error` (API `detail` surfaced by `api.ts`).
+- **Polling `AbortError`**: ignored (expected on cleanup or superseded request).
+- **Insights failure after success**: logged; UI may show empty insights with loading false.
+- **Cluster events API failure**: falls back to representative events for first page.
+
+---
+
+*Generated to reflect the repository layout at documentation time; after code changes, re-verify signatures and response shapes against `backend/main.py` and Pydantic models.*
