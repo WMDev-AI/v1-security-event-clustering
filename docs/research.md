@@ -80,7 +80,7 @@ In other words, it bridges research-grade clustering quality optimization with p
 
 Let the parsed event dataset be:
 
-$\mathcal{D} = x_i_{i=1}^{N}, \quad x_i \in \mathbb{R}^{d}$
+$\mathcal{D} = \{x_i\}_{i=1}^{N}, \quad x_i \in \mathbb{R}^{d}$
 
 where each $x_i$ is a normalized feature vector derived from raw log fields.
 
@@ -403,6 +403,28 @@ For reliable downstream clustering, preprocessing should be audited with:
 - **Temporal drift checks**: evaluate batch/window shifts to detect non-stationarity that may require retraining or feature reconfiguration.
 
 These controls are essential because representation quality strongly bounds achievable cluster quality, regardless of model sophistication.
+
+### 5.11 Feature Encoder Improvements for Clustering Accuracy
+
+The deep encoder $f_\theta$ can only exploit structure that is present (or recoverable) in the input vectors $x_i$. Improvements to the hand-crafted encoder $\phi$ therefore raise the **ceiling** for both training stability and intrinsic metrics (e.g., Silhouette), especially when logs carry free-text `content` and high-cardinality categorical fields. The following enhancements are implemented in the event featurizer and are orthogonal to the choice of model family: they sharpen the input geometry before latent learning and refinement.
+
+**Deterministic categorical projection.** High-cardinality or opaque string identifiers (e.g., IPS `rule_id`, firewall zone pairs) are mapped to a fixed interval using a **stable** hash: UTF-8 MD5 digest, reduction modulo $M$, then normalization to $[0,1]$:
+
+$h_M(s) = \frac{(\text{int}(\text{MD5}(s)) \bmod M)}{M - 1}$
+
+(with the empty string mapped to $0$). This replaces process-dependent `hash()` semantics so repeated training runs, A/B comparisons, and regression tests see **reproducible** feature values for the same log corpus. Reproducibility matters for SOC tooling: analysts and engineers must be able to trust that a configuration change in the model—not random featurization—drives metric deltas.
+
+**Cyclic hour encoding.** Raw normalized hour treats midnight as a discontinuity. The encoder uses a two-dimensional cyclic representation:
+
+$\big(\sin(2\pi t/24),\ \cos(2\pi t/24)\big)$
+
+for hour $t$, together with day-of-week and business-hours indicators. Neighboring hours stay close in Euclidean space, which better matches true temporal proximity for diurnal attack and operational patterns.
+
+**Semantic content channel.** Beyond normalized content length, the parser adds a compact **threat-semantic** block derived from `content` (lowercased): six fixed keyword groups (credential/auth abuse, malware/execution, reconnaissance/scanning, exfiltration/data movement, web-application attack language, and C2/persistence/lateral-movement hints). Each group contributes a binary “any phrase matched” feature. Two structural scalars augment separability: **token count** (capped and scaled) and **exclamation density** (capped), which help distinguish verbose alerts, marketing noise, or vendor-specific formatting from terse firewall lines. This channel is intentionally lightweight—no transformer or large vocabulary—so ingestion stays fast while still pulling attack-relevant language into $x_i$.
+
+**Vector dimension.** After these additions, fixed-length event vectors use $d = 70$ dimensions (including the existing padded subsystem-specific block), exposed consistently via the parser’s reported feature dimension for model construction.
+
+**Interaction with the rest of the pipeline.** Vectors are still passed through per-dataset standardization (Section 5.5) before $f_\theta$. Thus, encoder improvements act as a **better-conditioned** input to pretraining, cluster initialization, and latent ensemble refinement: separable directions in $x$ are easier to preserve in $z$, which supports clearer partitions and stronger intrinsic scores when the underlying behaviors differ along those axes.
 
 ---
 
