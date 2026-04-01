@@ -181,21 +181,35 @@ Advantages of this architecture include:
 - **Reproducibility**: explicit stage boundaries support controlled experiments and ablation studies.
 - **Operational robustness**: failures can be localized to stages without collapsing the entire workflow design.
 
-```mermaid
-flowchart TD
-    A[Raw Security Logs] --> B[Parser]
-    B --> C[Feature Extraction]
-    C --> D[Normalization]
-    D --> E[Deep Representation Learning]
-    E --> F[Cluster Initialization]
-    F --> G[Deep Fine-tuning]
-    G --> H[Latent Embeddings Z]
-    H --> I[Base Assignments]
-    I --> J[Latent Ensemble Refinement]
-    J --> K[Final Labels]
-    K --> L[Intrinsic Metrics]
-    K --> M[Cluster Profiling]
-    M --> N[Security Insights and Recommendations]
+```text
+High-level pipeline (Figure 4.1 — text form for standard Markdown preview):
+
+  Raw Security Logs
+        │
+        ▼
+     Parser ──► Feature Extraction ──► Normalization
+        │              │                    │
+        └──────────────┴────────────────────▼
+                         Deep Representation Learning
+                                    │
+                                    ▼
+                    Cluster Initialization ──► Deep Fine-tuning
+                                    │
+                                    ▼
+                         Latent embeddings Z
+                                    │
+                                    ▼
+                         Base assignments
+                                    │
+                                    ▼
+                    Latent ensemble refinement
+                                    │
+                                    ▼
+                            Final labels ──┬──► Intrinsic metrics
+                                           └──► Cluster profiling
+                                                      │
+                                                      ▼
+                                    Security insights and recommendations
 ```
 
 
@@ -228,17 +242,21 @@ Advantages of this architecture include:
 - **Maintainability**: each runtime component has a clear responsibility and interface contract.
 - **Extensibility**: new model families or insight modules can be added with limited impact on other components.
 
-```mermaid
-flowchart LR
-    U[Frontend] --> API[FastAPI Service]
-    API --> PARSER[Event Parser]
-    API --> TRAINER[DeepClusteringTrainer]
-    TRAINER --> MODELS[DEC / IDEC / VaDE / Contrastive]
-    TRAINER --> REFINE[Latent Refinement Engine]
-    API --> ANALYZER[Cluster Analyzer]
-    API --> INSIGHTS[Security Insights Engine]
-    ANALYZER --> U
-    INSIGHTS --> U
+```text
+Runtime components (Figure 4.2 — text form for standard Markdown preview):
+
+  ┌──────────┐     ┌─────────────────┐
+  │ Frontend │────►│ FastAPI service │
+  └────▲─────┘     └────────┬────────┘
+       │                     │
+       │    ┌────────────────┼────────────────┐
+       │    ▼                ▼                ▼
+       │ Event parser   DeepClusteringTrainer   Cluster analyzer
+       │                    │  │                 Security insights engine
+       │                    │  ├─► Model family (DEC / IDEC / VaDE / Contrastive)
+       │                    │  └─► Latent refinement engine
+       │                    │
+       └────────────────────┴── results / metrics / insights
 ```
 
 
@@ -265,19 +283,13 @@ Advantages of this architecture include:
 - **Control and governance**: transitions enforce a deterministic training lifecycle.
 - **User trust**: explicit postprocessing state explains delays after fine-tuning and reduces confusion.
 
-```mermaid
-stateDiagram-v2
-    [*] --> parsing
-    parsing --> pretraining
-    pretraining --> initialization
-    initialization --> fine_tuning
-    fine_tuning --> postprocessing
-    postprocessing --> completed
-    parsing --> failed
-    pretraining --> failed
-    initialization --> failed
-    fine_tuning --> failed
-    postprocessing --> failed
+```text
+Training stages (Figure 4.3 — text form for standard Markdown preview):
+
+  start → parsing → pretraining → initialization → fine_tuning → postprocessing → completed
+
+  Any stage may transition to: failed  (parsing, pretraining, initialization,
+                                         fine_tuning, or postprocessing)
 ```
 
 
@@ -598,24 +610,16 @@ This decomposition improves controllability: each stage answers a different ques
 
 ### 7.2 Sequence-Level Workflow
 
-```mermaid
-sequenceDiagram
-    participant U as User/API
-    participant P as Parser
-    participant T as Trainer
-    participant R as Refinement
-    participant A as Analyzer
+```text
+Sequence workflow (Figure 7.2 — text form for standard Markdown preview):
 
-    U->>P: Upload and parse events
-    P->>T: Normalized matrix X
-    T->>T: Pretrain encoder
-    T->>T: Initialize centers/distribution
-    T->>T: Fine-tune deep objective
-    T->>R: Latent Z and labels y0
-    R->>R: Bounded ensemble search
-    R-->>T: Refined labels y*
-    T->>A: Events + y* + Z
-    A-->>U: Metrics, clusters, insights
+  1. User/API ──► Parser: upload and parse events
+  2. Parser ──► Trainer: normalized matrix X
+  3. Trainer: pretrain encoder → initialize centers/distribution → fine-tune objective
+  4. Trainer ──► Refinement: latent Z and initial labels y0
+  5. Refinement: bounded ensemble search ──► refined labels y*
+  6. Trainer ──► Analyzer: events + y* + Z
+  7. Analyzer ──► User/API: metrics, clusters, insights
 ```
 
 
@@ -776,19 +780,28 @@ The refinement stage therefore behaves as an anytime optimization: when the time
 
 ### 9.4 Conceptual Figure
 
-```mermaid
-flowchart TD
-    A[Latent Z and labels y0] --> B[Generate candidate spaces]
-    B --> C1[K-means grid]
-    B --> C2[GMM grid]
-    B --> C3[Agglomerative grid]
-    C1 --> D[Score by Silhouette]
-    C2 --> D
-    C3 --> D
-    D --> E[Apply constraints and choose best y*]
-    E --> F{Gain >= delta?}
-    F -- Yes --> G[Use refined labels]
-    F -- No --> H[Keep original labels]
+```text
+Refinement decision flow (Figure 9.4 — text form for standard Markdown preview):
+
+  Latent Z, labels y0
+        │
+        ▼
+  Generate candidate spaces (e.g. latent / PCA views)
+        │
+        ├──► K-means grid ────┐
+        ├──► GMM grid ────────┼──► Score each partition (e.g. Silhouette)
+        └──► Agglomerative grid ┘
+                    │
+                    ▼
+        Apply constraints; pick best candidate y*
+                    │
+                    ▼
+            Gain ≥ δ ?
+           ╱          ╲
+         yes            no
+          │              │
+          ▼              ▼
+   Use refined y*   Keep original labels
 ```
 
 
@@ -1014,33 +1027,35 @@ $\Delta S$ summarizes **relative** gains; combined encoder + refinement typicall
 
 ### 13.5 Figure 4 — Illustrative Silhouette trajectory across stages
 
-The diagram below is a **schematic** monotonic uplift curve (not a per-epoch training log). It communicates the *shape* of improvement from raw features to deep latent space to refined assignments. Renderers that support Mermaid `xychart-beta` will show a simple line chart; others may omit the graphic—Table 1 remains authoritative for numbers.
+The figure below is a **schematic** monotonic uplift (not a per-epoch training log). It shows the *shape* of improvement from raw features to deep latent space to refined assignments. It uses a plain-text chart so the built-in VS Code Markdown preview renders it without extra extensions—Table 1 remains authoritative for numbers.
 
-```mermaid
-xychart-beta
-    title "Illustrative Silhouette vs pipeline stage (latent metric)"
-    x-axis [K-means(raw), IDEC(latent), IDEC+Refine]
-    y-axis "Silhouette" 0 --> 0.25
-    line [0.05, 0.12, 0.19]
+```text
+Figure 13.5 — Illustrative Silhouette vs pipeline stage (latent metric, same values as Table 1)
+
+  Stage              S (approx)   Text bar (0 … 0.25 scale)
+  ─────────────────  ───────────  ───────────────────────────
+  K-means (raw)      0.05         ██░░░░░░░░░░░░░░░░░░
+  IDEC (latent)      0.12         █████░░░░░░░░░░░░░░░
+  IDEC + Refine      0.19         ████████░░░░░░░░░░░░
 ```
 
 ### 13.6 Figure 5 — Runtime vs quality tradeoff (schematic)
 
-Postprocessing improves intrinsic scores but consumes bounded CPU time. The quadrant chart situates **four operating points** as conceptual examples; axis scales are qualitative.
+Postprocessing improves intrinsic scores but consumes bounded CPU time. The sketch below situates **four operating points** as conceptual examples; axis scales are qualitative (plain text for standard Markdown preview).
 
-```mermaid
-quadrantChart
-    title Latency-quality tradeoff (schematic)
-    x-axis Low postprocess time --> High postprocess time
-    y-axis Lower Silhouette --> Higher Silhouette
-    quadrant-1 Target zone
-    quadrant-2 Fast but weaker
-    quadrant-3 Avoid
-    quadrant-4 Slow marginal gains
-    No refinement: [0.20, 0.35]
-    T_max 2s: [0.35, 0.50]
-    T_max 8s: [0.55, 0.72]
-    T_max 30s: [0.85, 0.78]
+```text
+Figure 13.6 — Latency vs quality tradeoff (schematic)
+
+                    higher Silhouette S
+                           ▲
+         "Target zone"      │     slower / marginal gains
+         (e.g. T_max 8s)   │     (e.g. T_max 30s)
+                           │
+         fast / weaker     │     (avoid: high time, weak gain)
+         (no refinement,   │
+          T_max 2s)        │
+                           └──────────────────────────────►
+                               low ──► high postprocess time
 ```
 
 Interpretation: moving right increases refinement budget; the **target zone** balances acceptable SOC latency with measurable $S$ gains. Saturation (upper-right) can occur when the time budget exceeds useful new candidates—consistent with bounded search in Section 9.
@@ -1057,14 +1072,14 @@ Interpretation: moving right increases refinement budget; the **target zone** ba
 | Fine-tuning | 48% |
 | Refinement (postprocessing) | 6% |
 
-```mermaid
-pie showData
-    title Illustrative wall-time by stage (%)
-    "Fine-tuning" : 48
-    "Pretraining" : 38
-    "Refinement" : 6
-    "Initialization" : 5
-    "Parse/featurize" : 3
+```text
+Figure 13.7 — Illustrative wall-time by stage (matches table above; bar = relative share)
+
+  Fine-tuning        48%  ████████████████████████
+  Pretraining        38%  ███████████████████
+  Refinement          6%  ███
+  Initialization      5%  ██
+  Parse / featurize   3%  █
 ```
 
 Together, the tables and figures summarize **where** quality improvements tend to appear (intrinsic metrics, ablations) and **how** runtime concentrates (pretrain/finetune vs short refinement), supporting the design goals in Sections 10 and 14.
