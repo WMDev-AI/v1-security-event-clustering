@@ -142,16 +142,19 @@ Base URL (default): `http://localhost:8000/api`
 ### 2.13 `GET /insights/{job_id}`
 
 - **Response** (`FullInsightsResponse`-shaped JSON): `job_id`, `total_events`, `total_clusters`, `insights` (list of insight objects), `correlations`, `executive_summary`, `threat_landscape`.
+- **Semantics**: Built by grouping training events by cluster label, running `SecurityInsightsEngine.analyze_cluster_insights` per cluster, `find_cluster_correlations`, `generate_executive_summary`, and `_generate_threat_landscape`. See **§9** for measurement, risk, correlations, and IOC context.
 - **Errors**: `400` / `404` if job incomplete or missing.
 
 ### 2.14 `GET /insights/{job_id}/cluster/{cluster_id}`
 
 - **Response**: `cluster_id`, `event_count`, `profile` (nullable cluster profile dict), `insights`, `risk_assessment`, `sample_events`.
+- **`risk_assessment`**: Output of `main._calculate_cluster_risk` for that cluster’s events (numeric `score`, categorical `level`, `factors`, `event_count`). See **§9.4**.
 - **Errors**: `404` if cluster empty / missing.
 
 ### 2.15 `GET /insights/{job_id}/iocs`
 
 - **Response**: IOC aggregation: `malicious_ips`, `attack_patterns`, `suspicious_users`, `firewall_rules`, counts, `generated_at`, etc.
+- **Semantics**: Re-runs per-cluster insight extraction and folds `ioc_indicators` plus heuristic user blocking stats into a single export. See **§9.6**.
 - **Errors**: `404` if model missing.
 
 ### 2.16 `GET /insights/{job_id}/mitre`
@@ -391,29 +394,123 @@ These are defined in `backend/main.py` unless noted.
 
 ---
 
-## 9. Security insights (`backend/security_insights.py`)
+## 9. Security analytics: insights, risk, correlations, attack-chain hints, and IOCs
 
-### 9.1 Dataclasses
+This section documents **`backend/security_insights.py`** and the **API-layer** helpers in **`backend/main.py`** that turn clustered events into SOC-oriented narratives. Everything here is **heuristic and rule-based** unless noted; it does not use the neural clustering loss.
 
-- **`AttackPattern`**: `pattern_id`, `pattern_name`, `description`, `confidence`, MITRE lists, `indicators`, `affected_assets`, `timeline`, `severity`.
-- **`ThreatActor`**: `actor_id`, `source_ips`, `behavior_type`, timelines, `targeted_systems`, `techniques_used`, `risk_score`.
-- **`AnomalyScore`**: scalar subscores + `reasons`.
-- **`SecurityInsight`**: `insight_id`, `category`, `title`, `description`, `severity`, `confidence`, evidence fields, MITRE fields, recommendations, `ioc_indicators`, etc.
-- **`ClusterCorrelation`**: `cluster_a`, `cluster_b`, `correlation_type`, `correlation_strength`, `shared_indicators`, `description`.
+### 9.1 Dataclasses (`security_insights.py`)
 
-### 9.2 `SecurityInsightsEngine`
+| Type | Main fields | Role in API |
+|------|-------------|-------------|
+| **`SecurityInsight`** | `insight_id`, `category` (`attack`, `policy_violation`, `anomaly`, `reconnaissance`, …), `title`, `description`, `severity` (`critical`…`info`), `confidence` (float, template-assigned), `event_count`, `sample_events`, `affected_subsystems`, `source_ips`, `target_assets`, `mitre_tactics`, `mitre_techniques`, `immediate_actions`, `long_term_actions`, `related_clusters`, `ioc_indicators` | One **actionable narrative** attached to evidence; serialized in `/insights/*` responses. |
+| **`ClusterCorrelation`** | `cluster_a`, `cluster_b`, `correlation_type`, `correlation_strength`, `shared_indicators`, `description` | Pairwise **hypothesis** between clusters (see §9.5). |
+| **`AttackPattern`**, **`ThreatActor`**, **`AnomalyScore`** | Various | Defined for richer modeling; primary HTTP payloads today center on **`SecurityInsight`** and summaries built from them. |
 
-- **Class data**: `MITRE_MAPPINGS`, `SUSPICIOUS_PORTS`, `PRIVATE_RANGES`.
-- **Instance lists**: `insights`, `attack_patterns`, `threat_actors`, `correlations` (mutable caches during analysis).
+### 9.2 `SecurityInsightsEngine` — processing pipeline
 
-**Public methods**
+**Class data**
 
-- `analyze_cluster_insights(cluster_id, events, latent_features=None) -> list[SecurityInsight]` — orchestrates stats collection, attack pattern detectors, policy/anomaly/recon/exfil heuristics, sample events.
-- `find_cluster_correlations(profiles, events_by_cluster)` — cross-cluster correlation objects.
-- `generate_executive_summary(insights, n_clusters, total_events)` — overview dict for API.
+- **`MITRE_MAPPINGS`**: lowercase keyword → `(tactic_name, technique_label)`; used when building `mitre_tactics` / `mitre_techniques` on specific insight templates (not a learned classifier).
+- **`SUSPICIOUS_PORTS`**: port → `(service_name, severity_hint)` for narrative and severity flavor.
+- **`PRIVATE_RANGES`**: RFC1918-style networks for `_is_external_ip`.
 
-**Private detectors (representative)**  
-`_collect_cluster_stats`, `_detect_attack_patterns`, `_is_brute_force`, `_create_brute_force_insight`, analogous `_is_web_attack`, `_is_ddos`, `_is_malware_c2`, policy and anomaly helpers, `_get_sample_events`, `_generate_priorities`, etc. Each `_create_*` builds one or more `SecurityInsight` instances from aggregated `stats`.
+**`analyze_cluster_insights(cluster_id, events, latent_features=None)`**
+
+1. **`_collect_cluster_stats`**: single pass over `events` → counters for subsystems, actions, severities, source/dest IPs, dest ports, users, hours, `content_words` (regex tokens), protocols, block/allow counts, internal vs external sources, timestamps list.
+2. **Detectors** (each may append zero or more `SecurityInsight`):
+   - `_detect_attack_patterns` → brute force, web attack, DDoS, malware/C2 heuristics (`_is_*` + `_create_*_insight`).
+   - `_detect_policy_violations` → unauthorized access, data-policy style patterns.
+   - `_detect_anomalies` → temporal and volume anomalies.
+   - `_detect_reconnaissance` → scan/probe style signals.
+   - `_detect_data_exfiltration` → exfiltration-style content/volume cues.
+3. **`latent_features`**: reserved for future use; current templates rely on **parsed fields + content stats**, not on $Z$.
+
+**`generate_executive_summary(all_insights, cluster_count, total_events)`**
+
+- Aggregates severity and category histograms; lists top critical/high findings with snippets; collects unique MITRE tactics/techniques from insights; counts IP-type IOCs; calls **`_generate_priorities`** (severity-driven + title-keyword rules such as Brute Force / Web Application / DDoS / Exfiltration).
+
+### 9.3 Security insights — measurement and interpretation
+
+An insight is **measured** for SOC purposes along several auditable axes (no single scalar in the API):
+
+| Axis | Source fields | How to use |
+|------|----------------|------------|
+| **Coverage** | Count of insights per cluster; `executive_summary.overview.insights_generated` | Low count may mean quiet cluster or weak keyword match; cross-check raw event volume. |
+| **Severity** | `severity` | Drives triage ordering; should be cross-checked against `sample_events`. |
+| **Evidence mass** | `event_count` vs cluster size | Large `event_count` relative to cluster supports stronger claims. |
+| **Confidence** | `confidence` | Template constant or heuristic; treat as **relative** ranking, not calibrated probability. |
+| **Traceability** | `sample_events`, `source_ips`, `target_assets` | Trace back to raw logs before enforcement. |
+| **Actionability** | `immediate_actions`, `long_term_actions`; `recommended_priorities` in executive summary | Map to tickets/owners; executive list is **global** synthesis. |
+
+**MITRE fields**: Populated from **`MITRE_MAPPINGS`** and hard-coded strings in `_create_*_insight` methods (e.g. brute force → Credential Access / T1110). Validate against source events when auditing.
+
+### 9.4 Cluster risk assessment (API layer)
+
+Distinct from per-insight severity: **`main._calculate_cluster_risk(events)`** scores **all events in one cluster** with a **transparent additive model** (cap 100), then maps to `level` ∈ {`critical`, `high`, `medium`, `low`}.
+
+**Contributions (conceptual)**
+
+- **High block rate**: if fraction of events with action in {blocked, denied, drop} **> 0.8** → add points; factor string recorded.
+- **Severity histogram**: increments for `critical` and `high` event severities; factors name counts.
+- **Subsystem cues**: `ips`/`ids` or `ddos` in subsystem string → fixed bonuses.
+- **Content keywords**: if share of events whose `content` contains any of {attack, exploit, malware, intrusion, breach} **> 0.1** → bonus; factor recorded.
+
+**Return shape**: `{ "score", "level", "factors", "event_count" }`.
+
+**Where it appears**
+
+- **`GET /insights/{job_id}/cluster/{cluster_id}`** → `risk_assessment`.
+- **`threat_landscape.cluster_risk_scores`** in **`GET /insights/{job_id}`** — dict keyed by `cluster_id` string with the same structure per cluster.
+
+This risk score is **independent** of Silhouette or deep model loss; it summarizes **log semantics** inside the cluster.
+
+### 9.5 Cluster correlations and attack-chain hints
+
+**`find_cluster_correlations(cluster_profiles, events_by_cluster)`** compares **unordered pairs** of clusters $(a,b)$ using sets of **source** and **destination** IPs from parsed events (not from insights).
+
+Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` values.
+
+| `correlation_type` | Condition | `correlation_strength` | Meaning |
+|--------------------|-----------|-------------------------|---------|
+| **`same_source`** | $S_a \cap S_b \neq \emptyset$ | $\|S_a \cap S_b\| / \max(\|S_a\|, \|S_b\|)$, emitted only if **> 0.1** | Shared origin IPs across behavioral groups. |
+| **`same_target`** | $T_a \cap T_b \neq \emptyset$ | $\|T_a \cap T_b\| / \max(\|T_a\|, \|T_b\|)$, only if **> 0.1** | Same victims/services touched from different clusters. |
+| **`attack_chain`** | $S_a \cap T_b \neq \emptyset$ | $\|S_a \cap T_b\| / \|S_a\|$ | **Hypothesis**: actors (sources) in cluster $a$ appear as **targets** in $b$ (e.g. pivot); not proof of temporal ordering. |
+
+**`shared_indicators`**: up to 5 sample IPs from the intersection. **`description`**: human-readable summary.
+
+**Operational note**: NAT, scanners, and load balancers create false overlaps; correlate with timestamps and asset inventory before incident declaration.
+
+### 9.6 IOC extraction and evaluation (`GET /insights/{job_id}/iocs`)
+
+**Flow (`get_indicators_of_compromise`)**
+
+1. Group all training `events` by final cluster label.
+2. For each cluster, call `analyze_cluster_insights` (same as full-insights path).
+3. **IP IOCs**: for each insight, for each element of `ioc_indicators` with `type == "ip"`, aggregate by IP:
+   - append `context` strings (deduped later),
+   - add `insight.event_count` into a running **event_count** (approximate weighting),
+   - promote stored `severity` to `critical`/`high` if any contributing insight has that severity.
+4. **Attack patterns**: insights with `category == "attack"` → list entries with title, description excerpt, MITRE techniques, sample `source_ips`, severity.
+5. **Suspicious users**: across **all** events (not per cluster), users where **> 50%** of their events have action blocked/denied → `suspicious_users` with reasons.
+6. **`firewall_rules`**: `main._generate_firewall_rules` suggests block lists / rate limits / WAF toggles from aggregated IOC structure (advisory only).
+
+**Response highlights**: `generated_at`, `malicious_ips` (sorted by event_count, capped), `attack_patterns`, `suspicious_users`, `firewall_rules`, `total_unique_threat_ips`, `total_attack_patterns`.
+
+**How to evaluate IOC quality in operations**
+
+- **Provenance**: jump from IP row to originating insights and samples before blocking.
+- **Stale data**: IOCs reflect the **trained job snapshot**; retrain or refresh after major log or policy changes.
+- **False positives**: shared egress IPs and CDNs inflate “malicious” lists; enrich with ownership and reputation feeds.
+- **Automation**: treat `firewall_rules` as **draft** change requests, not auto-applied production policy.
+
+### 9.7 Related API entry points (summary)
+
+| Endpoint | Primary content |
+|----------|-----------------|
+| `GET /insights/{job_id}` | Flattened `insights`, `correlations`, `executive_summary`, `threat_landscape` (includes `cluster_risk_scores`). |
+| `GET /insights/{job_id}/cluster/{cluster_id}` | One cluster’s `insights`, `risk_assessment`, `profile`, `sample_events`. |
+| `GET /insights/{job_id}/iocs` | Aggregated IOCs and suggested rules (§9.6). |
+| `GET /insights/{job_id}/mitre` | Recomputes insights and builds tactic/technique rollups, kill-chain narrative, mitigation suggestions (`main` helpers). |
 
 ---
 
