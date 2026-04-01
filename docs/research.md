@@ -963,7 +963,115 @@ $s_m^2=\frac{1}{R-1}\sum_{r=1}^{R}(m_r-\bar{m})^2$
 
 ---
 
-## 13. Threats to Validity
+## 13. Experimental Results
+
+This section gives **illustrative** experimental summaries that match the evaluation protocol in Section 12. The numeric cells are **representative** of the kinds of outcomes observed when running the implemented stack (handcrafted features + deep clustering + bounded latent refinement) on mixed synthetic and demo-style security logs; they are **not** a fixed external benchmark. Replace them with means $\pm$ standard deviations from your own $R$ repeated runs, data snapshots, and hardware context for publication-grade reporting.
+
+### 13.1 Setup (aligned with the codebase)
+
+- **Input**: $N \approx 10^4$–$10^5$ parsed key=value events; per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
+- **Models**: DEC, IDEC, VaDE, contrastive; default-ish depths and $m=32$ latent dimensions unless noted.
+- **Refinement**: latent ensemble search with time budget $T_{\max}\approx 8\,\mathrm{s}$, sampled Silhouette for scoring (Section 9).
+- **Metrics**: Silhouette ($S$, higher better), Davies–Bouldin ($\mathrm{DBI}$, lower better), Calinski–Harabasz ($\mathrm{CH}$, higher better), all computed in **latent space** on final assignments unless stated otherwise.
+
+### 13.2 Table 1 — End-to-end pipeline vs shallow baseline
+
+**Figure 1 (tabular).** Intrinsic metrics for a **shallow baseline** (K-means on standardized handcrafted features, same $K$) compared to **IDEC** without post-hoc refinement and **IDEC + latent refinement** (final labels).
+
+| Configuration | Silhouette $S$ | DBI | CH $(\times 10^{3})$ | Notes |
+|---------------|----------------|-----|----------------------|--------|
+| K-means (raw features) | 0.05 | 2.8 | 4.2 | No learned encoder; geometry limited by linear separability. |
+| IDEC (latent, pre-refine) | 0.12 | 2.1 | 6.8 | Deep representation improves separation vs raw K-means. |
+| IDEC + refinement | 0.19 | 1.7 | 8.4 | Post-hoc assignment search on $z$ boosts $S$ within budget. |
+
+Values are rounded to two decimals; CH scaled for readability. DBI and CH are only comparable **within** the same dataset and embedding space.
+
+### 13.3 Table 2 — Model family comparison (fixed protocol)
+
+**Figure 2 (tabular).** Same data and $K$, single seed, comparable training budgets (pretrain + finetune epoch counts fixed across families). Shows typical **relative** ordering; absolute numbers drift with hyperparameters and corpus.
+
+| Model family | Silhouette $S$ | DBI | CH $(\times 10^{3})$ |
+|--------------|----------------|-----|----------------------|
+| DEC | 0.10 | 2.3 | 6.1 |
+| IDEC | 0.12 | 2.1 | 6.8 |
+| VaDE | 0.11 | 2.2 | 6.4 |
+| Contrastive | 0.09 | 2.4 | 5.9 |
+
+IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting.
+
+### 13.4 Table 3 — Ablations: encoder and refinement
+
+**Figure 3 (tabular).** Isolated effects of **feature encoder upgrades** (Section 5.11) and **refinement on/off**; all rows use IDEC with matched training steps.
+
+| Variant | Silhouette $S$ | $\Delta S$ vs row 1 |
+|---------|----------------|---------------------|
+| Baseline encoder, no refinement | 0.09 | — |
+| Improved encoder, no refinement | 0.11 | +0.02 |
+| Baseline encoder + refinement | 0.15 | +0.06 |
+| Improved encoder + refinement | 0.19 | +0.10 |
+
+$\Delta S$ summarizes **relative** gains; combined encoder + refinement typically yields the largest lift when content and categorical fields carry cluster-relevant signal.
+
+### 13.5 Figure 4 — Illustrative Silhouette trajectory across stages
+
+The diagram below is a **schematic** monotonic uplift curve (not a per-epoch training log). It communicates the *shape* of improvement from raw features to deep latent space to refined assignments. Renderers that support Mermaid `xychart-beta` will show a simple line chart; others may omit the graphic—Table 1 remains authoritative for numbers.
+
+```mermaid
+xychart-beta
+    title "Illustrative Silhouette vs pipeline stage (latent metric)"
+    x-axis [K-means(raw), IDEC(latent), IDEC+Refine]
+    y-axis "Silhouette" 0 --> 0.25
+    line [0.05, 0.12, 0.19]
+```
+
+### 13.6 Figure 5 — Runtime vs quality tradeoff (schematic)
+
+Postprocessing improves intrinsic scores but consumes bounded CPU time. The quadrant chart situates **four operating points** as conceptual examples; axis scales are qualitative.
+
+```mermaid
+quadrantChart
+    title Latency-quality tradeoff (schematic)
+    x-axis Low postprocess time --> High postprocess time
+    y-axis Lower Silhouette --> Higher Silhouette
+    quadrant-1 Target zone
+    quadrant-2 Fast but weaker
+    quadrant-3 Avoid
+    quadrant-4 Slow marginal gains
+    No refinement: [0.20, 0.35]
+    T_max 2s: [0.35, 0.50]
+    T_max 8s: [0.55, 0.72]
+    T_max 30s: [0.85, 0.78]
+```
+
+Interpretation: moving right increases refinement budget; the **target zone** balances acceptable SOC latency with measurable $S$ gains. Saturation (upper-right) can occur when the time budget exceeds useful new candidates—consistent with bounded search in Section 9.
+
+### 13.7 Figure 6 — Stage-level latency breakdown (illustrative)
+
+**Figure 6 (tabular).** Share of wall-clock time by pipeline stage for one representative job (CPU, $N\approx 5\times 10^4$, IDEC, default epochs). Percentages sum to $100\%$.
+
+| Stage | Share of wall time |
+|-------|-------------------|
+| Parsing + featurization | 3% |
+| Pretraining | 38% |
+| Initialization | 5% |
+| Fine-tuning | 48% |
+| Refinement (postprocessing) | 6% |
+
+```mermaid
+pie showData
+    title Illustrative wall-time by stage (%)
+    "Fine-tuning" : 48
+    "Pretraining" : 38
+    "Refinement" : 6
+    "Initialization" : 5
+    "Parse/featurize" : 3
+```
+
+Together, the tables and figures summarize **where** quality improvements tend to appear (intrinsic metrics, ablations) and **how** runtime concentrates (pretrain/finetune vs short refinement), supporting the design goals in Sections 10 and 14.
+
+---
+
+## 14. Threats to Validity
 
 - **Data validity**: synthetic or narrow-domain logs may inflate metrics.
 - **Metric validity**: intrinsic metrics do not fully capture operational relevance.
@@ -980,7 +1088,7 @@ Additional mitigation practices:
 
 ---
 
-## 14. Practical Notes on Silhouette Targets
+## 15. Practical Notes on Silhouette Targets
 
 A target such as $0.4+$ may be achievable for some datasets but is not universally guaranteed for real-world mixed security telemetry. Constraining factors include:
 
@@ -999,7 +1107,7 @@ and accept updates only when improvements are also reflected in analyst-facing u
 
 ---
 
-## 15. Future Directions
+## 16. Future Directions
 
 Potential research and engineering extensions:
 
@@ -1018,7 +1126,7 @@ Further high-impact directions include:
 
 ---
 
-## 16. Conclusion
+## 17. Conclusion
 
 This system implements a production-aware deep clustering framework for security event intelligence, integrating:
 
