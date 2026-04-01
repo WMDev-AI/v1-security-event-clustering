@@ -922,9 +922,87 @@ Two principles make this layer useful in practice:
 
 A simplified SOC utility objective:
 
-$\mathcal{U}*{soc}=\alpha \mathcal{R}*{triage}+\beta \mathcal{A}*{decision}-\gamma \mathcal{C}*{analyst}$
+$\mathcal{U}_{soc}=\alpha \mathcal{R}_{triage}+\beta \mathcal{A}_{decision}-\gamma \mathcal{C}_{analyst}$
 
-where $\mathcal{R}*{triage}$ is triage reduction benefit, $\mathcal{A}*{decision}$ is decision quality, and $\mathcal{C}_{analyst}$ is analyst effort.
+where $\mathcal{R}_{triage}$ is triage reduction benefit, $\mathcal{A}_{decision}$ is decision quality, and $\mathcal{C}_{analyst}$ is analyst effort.
+
+### 11.1 Measuring security insights, priority actions, and cluster risk
+
+**Insight measurement (operational view).** In this implementation, a *security insight* is not a single scalar; it is a structured object with explicit fields that analysts can audit: `category` (e.g. attack, policy violation, anomaly), `severity` (critical / high / medium / low / info), `confidence` (heuristic score in $[0,1]$), `event_count`, `sample_events`, `affected_subsystems`, `source_ips`, `target_assets`, `immediate_actions`, `long_term_actions`, and `ioc_indicators`. *Measurement* therefore proceeds by:
+
+1. **Coverage**: number of insights per cluster and globally (`insights_generated` in the executive summary).
+2. **Severity mix**: histogram over `severity` across all insights—useful for workload sizing (e.g. many `critical` implies immediate queue pressure).
+3. **Evidence weight**: `event_count` and overlap with raw telemetry (samples) validate that an insight is not a spurious label on a tiny fragment of a cluster.
+4. **Confidence**: treated as a *relative* ranking signal between heuristics of the same type, not a calibrated probability, unless validated on labeled data.
+
+**Priority actions.** Priorities are derived in two places. First, each `SecurityInsight` carries **immediate** and **long-term** action lists authored by rule templates (e.g. block high-volume sources, enable MFA, tune WAF). Second, the executive summary builds **`recommended_priorities`**: it prepends urgent lines when any `critical` insights exist, counts `attack`-category insights, then adds pattern-specific guidance when insight *titles* match coarse keywords (e.g. “Brute Force”, “Web Application”, “DDoS”, “Exfiltration”). Analysts should treat this list as a **ranked agenda** to merge with ticketing severity and business context.
+
+**Cluster risk assessment.** Cluster-level risk used in threat-landscape views is computed by a **transparent additive score** over the events in that cluster (capped at 100), then mapped to `critical` / `high` / `medium` / `low`:
+
+- Block-dominant clusters: if the fraction of events with actions in $\{\text{blocked}, \text{denied}, \text{drop}\}$ exceeds $0.8$, add points and record factor “High block rate”.
+- Severity: each `critical` event adds a large increment; `high` adds a medium increment; contributing factors are listed by name.
+- Subsystem cues: presence of `ips`/`ids` or `ddos` in subsystem names adds fixed bonuses (defensive-alert-heavy clusters).
+- Content keywords: if more than 10% of events contain high-salience threat tokens (e.g. attack, exploit, malware, intrusion, breach), add points.
+
+The returned object includes `score`, `level`, `factors`, and `event_count` so analysts can **inspect why** a cluster was rated—not only the final label. This is complementary to per-insight severity, which is pattern-specific.
+
+### 11.2 MITRE ATT&CK tactics and techniques (and how this system obtains them)
+
+**What MITRE ATT&CK represents.** The [MITRE ATT&CK](https://attack.mitre.org/) framework organizes adversary behavior into **tactics** (the “why” of an action—e.g. Initial Access, Credential Access) and **techniques** (the “how”—e.g. T1110 Brute Force). Mapping clusters to ATT&CK helps teams align detections, playbooks, and reporting with industry vocabulary.
+
+**How information is produced here (rule-based, not ML classification).** The `SecurityInsightsEngine` maintains an internal dictionary **`MITRE_MAPPINGS`**: keys are *short textual cues* (e.g. `brute`, `sqli`, `ddos`, `c2`) mapped to `(tactic_name, technique_string)` pairs. When a detector fires (e.g. brute-force heuristic passes), the corresponding **`SecurityInsight`** is constructed with **`mitre_tactics`** and **`mitre_techniques`** lists set explicitly in code for that template—see for example brute-force insights that set `Credential Access` and `T1110 - Brute Force`. Web, DDoS, and other pattern builders follow the same pattern.
+
+**Where consumers read aggregated MITRE data.**
+
+- **Per insight**: each insight object exposes `mitre_tactics` and `mitre_techniques`.
+- **Executive summary**: all insights are scanned; unique tactics and a truncated list of techniques appear under `mitre_coverage`.
+- **Dedicated API**: `GET /api/insights/{job_id}/mitre` recomputes insights per cluster and aggregates tactics/techniques, kill-chain-style narrative, coverage assessment, and suggested mitigations (from a small curated technique→mitigation table in the API layer).
+
+**Limitations.** These mappings are **heuristic and template-driven**: they depend on keyword statistics, ports, and subsystems—not on a trained ATT&CK classifier. False links are possible when log text is ambiguous; analysts should confirm against raw events and their own threat model.
+
+### 11.3 Cluster correlations and attack chains
+
+After clustering, the engine compares **pairs of clusters** using only **network identity overlap** on parsed `source_ip` and `dest_ip` fields (`find_cluster_correlations`).
+
+**Same-source correlation.** Let $S_a$, $S_b$ be the sets of source IPs in clusters $a$ and $b$. If $S_a \cap S_b \neq \emptyset$, define
+
+$\text{strength}_{ss} = \frac{|S_a \cap S_b|}{\max(|S_a|, |S_b|)}$.
+
+If $\text{strength}_{ss} > 0.1$, emit a `ClusterCorrelation` with `correlation_type="same_source"`, `shared_indicators` (sample of shared IPs), and a human-readable description. Intuition: a single actor or asset appears in multiple behavioral groups.
+
+**Same-target correlation.** Analogously for destination sets $T_a$, $T_b$:
+
+$\text{strength}_{st} = \frac{|T_a \cap T_b|}{\max(|T_a|, |T_b|)}$,
+
+with threshold $0.1$ and type `same_target`. Intuition: multiple attack patterns converge on the same victims or services.
+
+**Attack-chain hypothesis.** The implementation flags **`attack_chain`** when sources seen in cluster $a$ appear as **targets** in cluster $b$:
+
+$H_{ac} = S_a \cap T_b$.
+
+If non-empty, strength is reported as $|H_{ac}| / |S_a|$ (fraction of $a$’s sources that are “pivots” into $b$’s target set). The description states that sources in cluster $a$ are targets in cluster $b$, suggesting a possible **lateral movement or multi-stage** narrative. This is a **weak structural signal**: it does not prove temporal ordering or causality; analysts should validate with timestamps and authentication context.
+
+**Evaluation guidance.** Treat correlations as **hypotheses for investigation**: sort by `correlation_strength`, cross-check shared IPs against asset inventory, and reject spurious overlaps (NAT pools, load balancers, scanners hitting many clusters).
+
+### 11.4 Evaluating indicators of compromise (IOCs)
+
+**Definition in this pipeline.** IOCs are **actionable observables** extracted from insights and events: IP addresses attached to insights as `ioc_indicators`, attack-pattern summaries, suspicious user accounts, and suggested firewall rules.
+
+**Aggregation (`GET /api/insights/{job_id}/iocs`).** For each cluster, cluster insights are recomputed. For every insight:
+
+- **IP IOCs**: each indicator with `type == "ip"` increments per-IP aggregates: `contexts` (deduplicated strings such as `brute_force_source`), `event_count` (summed from `insight.event_count`), and `severity` escalated to `critical`/`high` when any contributing insight has that severity.
+- **Attack patterns**: `category == "attack"` insights contribute rows with title, description snippet, MITRE techniques, sample `source_ips`, and severity.
+- **Suspicious users**: globally, users with **block rate** $> 0.5$ across their events are listed with reasons.
+
+**How to evaluate IOC quality (analyst / engineering checklist).**
+
+1. **Provenance**: trace each IP IOC back to the insight and sample events—high `event_count` driven by a single noisy insight is weaker than consistent multi-insight agreement.
+2. **Severity vs. prevalence**: prefer blocking or hunting on IPs that appear with `critical`/`high` severity and multiple contexts rather than one-off scanner noise.
+3. **False-positive controls**: shared infrastructure, CDN edges, and corporate egress NAT can create **same_source** / IOC overlap without malice; correlate with reputation feeds and internal ownership.
+4. **Suggested firewall rules**: auto-generated rules (e.g. block lists for high-severity IPs, rate limits when brute-force patterns exist) are **starting points**—review change windows, scope, and rollback before production enforcement.
+5. **Temporal validity**: IOC endpoints include `generated_at`; stale jobs should be re-run after major log or policy changes.
+
+Together, §11.1–11.4 describe how this project turns clusters into **measured**, **prioritized**, **ATT&CK-aligned**, **correlation-aware**, and **IOC-ready** outputs—while keeping assumptions explicit for scientific and operational review.
 
 ---
 
