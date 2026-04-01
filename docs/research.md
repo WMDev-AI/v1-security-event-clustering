@@ -904,14 +904,37 @@ where $\Theta$ denotes model and refinement hyperparameters, and $\lambda$ encod
 
 ## 11. Security Analytics Layer
 
-Cluster outputs are mapped to analyst-facing intelligence:
+Cluster outputs are mapped to analyst-facing intelligence. The following items are the main deliverables of the analytics layer: for each, we summarize **what** it is, **how** it is produced in this system, and **what to do** with it in practice.
 
-- threat-level estimation per cluster,
-- dominant subsystems/actions,
-- representative events,
-- top source IPs and destination ports,
-- recommended mitigation actions,
-- IOC and correlation extraction.
+- **Threat-level estimation per cluster**  
+  - *What:* A qualitative label (e.g. unknown, low, medium, high, critical) summarizing how “dangerous” or alert-heavy the cluster appears from aggregated event semantics—not from ground-truth labels.  
+  - *How:* The cluster analyzer scores each cluster using distributions of **severity** fields, **action** types (blocked vs allowed), **subsystem** exposure (e.g. IPS/IDS, DDoS), **suspicious destination ports**, and **content keywords** aligned with threat language. A separate **cluster risk** object (used in threat-landscape views) applies an additive numeric score with explicit **factors** so the label is inspectable.  
+  - *What to do:* Use threat level to **sort triage queues** and escalation policy; **open the listed factors** before trusting the label alone; downgrade noise clusters dominated by benign policy blocks; escalate when threat level aligns with business-critical assets or with high-severity insights for the same cluster.
+
+- **Dominant subsystems and actions**  
+  - *What:* The most frequent **subsystem** strings (firewall, WAF, IPS, etc.) and **action** outcomes (allow, block, deny, …) within each cluster, exposed as `primary_subsystems` and `primary_actions` in cluster profiles.  
+  - *How:* After clustering, all events assigned to cluster $k$ are scanned; counters aggregate normalized subsystem and action fields from the parser. The top categories by count (or frequency share) are selected for display and for narrative text in summaries.  
+  - *What to do:* **Match clusters to owning teams** (network vs app vs identity); **validate parser mappings** if subsystems look wrong; use dominant **block/deny** patterns to prioritize defensive controls and use dominant **allow** noise to consider filtering or separate “baseline” clusters in future runs.
+
+- **Representative events**  
+  - *What:* A small set of **raw or lightly structured events** chosen to exemplify what “typical” activity in the cluster looks like, so analysts need not scroll the full cluster volume immediately.  
+  - *How:* The analyzer selects representatives by **stratifying** or **scoring** diversity (e.g. favoring high-information fields, common IPs, or varied content) within the cluster; the UI can later **page** additional events via the cluster-events API.  
+  - *What to do:* **Read representatives first** to confirm the cluster is coherent; if they disagree with the cluster label, treat the partition as suspect (feature or $K$ issue); **quote representatives** in tickets or postmortems for traceability; **hunt** using fields copied from representatives (IPs, users, URLs).
+
+- **Top source IPs and destination ports**  
+  - *What:* Ranked **source IP** addresses and **destination port** numbers (with counts) that characterize where traffic in the cluster comes from and what services it hits.  
+  - *How:* Per-cluster counters over `source_ip` and `dest_port` from parsed events; top-$k$ entries are attached to profiles and often reused inside insights (e.g. brute-force sources, targeted services). Port semantics may be cross-checked against known sensitive services (SSH, RDP, SMB, etc.).  
+  - *What to do:* **Enrich IPs** with ownership and geolocation; **block or rate-limit** only after false-positive review; **correlate** top sources across clusters (see correlations below); **review ports** for unexpected exposure (e.g. management ports on internet-facing hosts) and align with vulnerability management.
+
+- **Recommended mitigation actions**  
+  - *What:* Short, concrete **immediate** and **long-term** recommendations tied to detected patterns (per insight) plus **executive-level priority lines** that synthesize the worst findings across clusters.  
+  - *How:* Template-based text is emitted when heuristics fire (e.g. authentication hardening after brute-force detection, WAF tuning after web-attack detection); the executive summary adds **recommended_priorities** from global severity counts and keyword matches on insight titles.  
+  - *What to do:* **Map each action to an owner** (SOC, IR, platform engineering); **convert** into change tickets with scope and rollback; **avoid blind automation**—tune rules to your environment; **measure** whether post-change log volume or risk scores improve on the next training run.
+
+- **IOC and correlation extraction**  
+  - *What:* **IOCs** are observable indicators (e.g. IP addresses with context strings, suspicious users, attack-pattern summaries) suitable for block lists, hunts, or threat-intel sharing; **correlations** link pairs of clusters when they share sources, share targets, or satisfy a simple **attack-chain** overlap rule (sources in one cluster appear as targets in another).  
+  - *How:* IOCs are gathered from **`ioc_indicators`** on insights and aggregated in the IOC endpoint (deduplicated contexts, severity roll-up, optional firewall-rule suggestions). Correlations are computed by set overlap on **source** and **destination** IP sets between cluster event groups, with numeric **strength** thresholds to suppress noise.  
+  - *What to do:* For IOCs, **verify provenance** (which insight and samples), **age out** stale indicators using `generated_at` and retraining, and **feed** only vetted IPs into enforcement tiers. For correlations, **treat as hypotheses**: validate with timestamps and identity data; use **shared-source** links for actor-centric cases and **attack-chain** links for possible lateral movement—then **document** disproven links to improve future heuristics.
 
 This conversion from unsupervised clusters to actionable security semantics is central for SOC integration.
 
