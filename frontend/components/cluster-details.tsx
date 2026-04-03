@@ -14,7 +14,6 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Dialog,
   DialogContent,
@@ -22,8 +21,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import type { ClusterResult, SecurityEvent } from "@/lib/api"
+import type { ClusterResult } from "@/lib/api"
 import { getClusterEvents } from "@/lib/api"
+import { EventsPopupTable } from "@/components/events-popup-table"
 import { cn } from "@/lib/utils"
 
 const POPUP_PAGE_SIZE = 50
@@ -278,73 +278,15 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             )}
 
             {!clusterEventsLoading && !clusterEventsError && clusterEventsData && (
-              <>
-                <ScrollArea className="h-[56vh] rounded-md border">
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
-                      <tr className="text-left">
-                        <th className="px-3 py-2 font-medium w-[70px]">#</th>
-                        <th className="px-3 py-2 font-medium w-[170px]">Time</th>
-                        <th className="px-3 py-2 font-medium w-[140px]">Source</th>
-                        <th className="px-3 py-2 font-medium w-[160px]">Destination</th>
-                        <th className="px-3 py-2 font-medium w-[90px]">Port</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Subsystem</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Action</th>
-                        <th className="px-3 py-2 font-medium w-[100px]">Severity</th>
-                        <th className="px-3 py-2 font-medium">Content</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {clusterEventsData.events.map((e: SecurityEvent & { index?: number }, rowIdx) => (
-                        <tr
-                          key={e.index !== undefined ? `i-${e.index}` : `p${clusterEventsData.page}-r${rowIdx}`}
-                          className="border-t border-border/50 align-top"
-                        >
-                          <td className="px-3 py-2 text-xs text-muted-foreground">
-                            {e.index ?? "—"}
-                          </td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.timestamp || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.source_ip || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.dest_ip || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.dest_port ?? "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.subsystem || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.action || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.severity || "-"}</td>
-                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.content || "-"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollArea>
-
-                <div className="flex items-center justify-between">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={
-                      clusterEventsData.page <= 1 || clusterEventsLoading || !jobId
-                    }
-                    onClick={() => void loadClusterEventsPage(clusterEventsData.page - 1)}
-                  >
-                    Previous
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    Showing {clusterEventsData.events.length} rows
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={
-                      clusterEventsData.page >= clusterEventsData.total_pages ||
-                      clusterEventsLoading ||
-                      !jobId
-                    }
-                    onClick={() => void loadClusterEventsPage(clusterEventsData.page + 1)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </>
+              <EventsPopupTable
+                events={clusterEventsData.events}
+                page={clusterEventsData.page}
+                totalPages={Math.max(1, clusterEventsData.total_pages)}
+                totalEvents={clusterEventsData.total_events}
+                loading={clusterEventsLoading}
+                onPageChange={(p) => void loadClusterEventsPage(p)}
+                disabled={!jobId}
+              />
             )}
           </div>
         </DialogContent>

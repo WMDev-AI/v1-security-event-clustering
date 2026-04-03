@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, Table2 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
+import { EventsPopupTable } from "@/components/events-popup-table"
 import {
   Dialog,
   DialogContent,
@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import type { AnalysisResponse, ClusterResult, SecurityEvent } from "@/lib/api"
+import type { AnalysisResponse, ClusterResult } from "@/lib/api"
 import {
   getClusterEvents,
   getThreatIndicatorEvents,
@@ -227,75 +227,20 @@ export function ThreatAnalysis({ data, jobId }: ThreatAnalysisProps) {
             )}
 
             {!loading && !error && eventsData && popup && (
-              <>
-                <ScrollArea className="h-[56vh] rounded-md border">
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
-                      <tr className="text-left">
-                        <th className="px-3 py-2 font-medium w-[70px]">#</th>
-                        <th className="px-3 py-2 font-medium w-[170px]">Time</th>
-                        <th className="px-3 py-2 font-medium w-[140px]">Source</th>
-                        <th className="px-3 py-2 font-medium w-[160px]">Destination</th>
-                        <th className="px-3 py-2 font-medium w-[90px]">Port</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Subsystem</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Action</th>
-                        <th className="px-3 py-2 font-medium w-[100px]">Severity</th>
-                        <th className="px-3 py-2 font-medium">Content</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {eventsData.events.map((e: SecurityEvent & { index?: number }, rowIdx) => (
-                        <tr
-                          key={
-                            e.index !== undefined
-                              ? `i-${e.index}`
-                              : `p${eventsData.page}-r${rowIdx}`
-                          }
-                          className="border-t border-border/50 align-top"
-                        >
-                          <td className="px-3 py-2 text-xs text-muted-foreground">
-                            {e.index ?? "—"}
-                          </td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.timestamp || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.source_ip || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.dest_ip || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.dest_port ?? "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.subsystem || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.action || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.severity || "-"}</td>
-                          <td className="px-3 py-2 text-xs text-muted-foreground">
-                            {e.content || "-"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollArea>
-
-                <div className="flex items-center justify-between">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={eventsData.page <= 1 || loading || !jobId}
-                    onClick={() => popup && void loadPage(popup, eventsData.page - 1)}
-                  >
-                    Previous
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    Showing {eventsData.events.length} rows
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={
-                      eventsData.page >= eventsData.total_pages || loading || !jobId
-                    }
-                    onClick={() => popup && void loadPage(popup, eventsData.page + 1)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </>
+              <EventsPopupTable
+                key={
+                  popup.kind === "cluster"
+                    ? `c-${popup.clusterId}`
+                    : `i-${popup.indicator.slice(0, 80)}`
+                }
+                events={eventsData.events}
+                page={eventsData.page}
+                totalPages={Math.max(1, eventsData.total_pages)}
+                totalEvents={eventsData.total_events}
+                loading={loading}
+                onPageChange={(p) => void loadPage(popup, p)}
+                disabled={!jobId}
+              />
             )}
           </div>
         </DialogContent>

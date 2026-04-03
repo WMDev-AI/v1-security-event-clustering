@@ -51,6 +51,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { EventsPopupTable } from "@/components/events-popup-table";
 
 interface SecurityInsight {
   insight_id: string;
@@ -1306,73 +1307,19 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
               </div>
             )}
 
-            {!mitrePopupLoading && !mitrePopupError && mitrePopupEvents && (
-              <>
-                <ScrollArea className="h-[56vh] rounded-md border">
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
-                      <tr className="text-left">
-                        <th className="px-3 py-2 font-medium w-[70px]">#</th>
-                        <th className="px-3 py-2 font-medium w-[170px]">Time</th>
-                        <th className="px-3 py-2 font-medium w-[140px]">Source</th>
-                        <th className="px-3 py-2 font-medium w-[160px]">Destination</th>
-                        <th className="px-3 py-2 font-medium w-[90px]">Port</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Subsystem</th>
-                        <th className="px-3 py-2 font-medium w-[120px]">Action</th>
-                        <th className="px-3 py-2 font-medium w-[100px]">Severity</th>
-                        <th className="px-3 py-2 font-medium">Content</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {mitrePopupEvents.events.map((e) => (
-                        <tr key={e.index} className="border-t border-border/50 align-top">
-                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.index}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.timestamp || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.source_ip || "-"}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{e.dest_ip || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.dest_port ?? "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.subsystem || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.action || "-"}</td>
-                          <td className="px-3 py-2 text-xs">{e.severity || "-"}</td>
-                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.content || "-"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </ScrollArea>
-
-                <div className="flex items-center justify-between">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={mitrePopupEvents.page <= 1 || mitrePopupLoading || !mitrePopup.filter}
-                    onClick={() => {
-                      if (!mitrePopup.filter) return;
-                      void loadMitrePopupEvents(mitrePopup.filter, mitrePopupEvents.page - 1);
-                    }}
-                  >
-                    Previous
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    Showing {mitrePopupEvents.events.length} rows
-                  </span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={
-                      mitrePopupEvents.page >= mitrePopupEvents.total_pages ||
-                      mitrePopupLoading ||
-                      !mitrePopup.filter
-                    }
-                    onClick={() => {
-                      if (!mitrePopup.filter) return;
-                      void loadMitrePopupEvents(mitrePopup.filter, mitrePopupEvents.page + 1);
-                    }}
-                  >
-                    Next
-                  </Button>
-                </div>
-              </>
+            {!mitrePopupLoading && !mitrePopupError && mitrePopupEvents && mitrePopup.filter && (
+              <EventsPopupTable
+                key={`${mitrePopup.filter.type}-${mitrePopup.filter.value}`}
+                events={mitrePopupEvents.events}
+                page={mitrePopupEvents.page}
+                totalPages={Math.max(1, mitrePopupEvents.total_pages)}
+                totalEvents={mitrePopupEvents.total_events}
+                loading={mitrePopupLoading}
+                onPageChange={(p) => {
+                  void loadMitrePopupEvents(mitrePopup.filter!, p);
+                }}
+                disabled={!mitrePopup.filter}
+              />
             )}
           </div>
         </DialogContent>
