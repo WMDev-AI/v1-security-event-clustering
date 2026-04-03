@@ -16,7 +16,7 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 | Training & metrics | `backend/trainer.py` | `DeepClusteringTrainer`, `TrainingConfig`, `ClusteringMetrics`, latent refinement |
 | Cluster narratives | `backend/cluster_analyzer.py` | `ClusterProfile`, per-cluster stats, summaries |
 | SOC intelligence | `backend/security_insights.py` | `SecurityInsightsEngine`, MITRE-style insights, correlations |
-| Frontend client | `frontend/lib/api.ts` | Typed fetch wrappers to `http://localhost:8000/api` |
+| Frontend client | `frontend/lib/api.ts` | Typed fetch wrappers to `http://localhost:8000/api` (insights, IOCs, MITRE, MITRE events) |
 
 ### 1.2 Process layout
 
@@ -55,6 +55,7 @@ Base URL (default): `http://localhost:8000/api`
 | GET | `/insights/{job_id}/cluster/{cluster_id}` | One cluster’s insights |
 | GET | `/insights/{job_id}/iocs` | IOC-style extract |
 | GET | `/insights/{job_id}/mitre` | MITRE-oriented mapping |
+| GET | `/insights/{job_id}/mitre/events` | Paginated events matching one MITRE tactic, technique, or kill-chain filter |
 
 ### 2.2 `GET /health`
 
@@ -161,6 +162,17 @@ Base URL (default): `http://localhost:8000/api`
 
 - **Response**: `tactics_coverage`, `techniques_detected`, counts, `kill_chain_analysis`, `coverage_assessment`, `mitigation_priorities`.
 - **Errors**: `404` if model missing.
+
+### 2.17 `GET /insights/{job_id}/mitre/events`
+
+- **Purpose**: Return paginated **raw training events** whose cluster assignments fall under clusters mapped to a **single** MITRE filter (exactly one query parameter must be set).
+- **Query** (provide **one** of):
+  - `tactic` — enterprise tactic name string (must match keys used in internal tactic→cluster maps).
+  - `technique` — technique label string as used in insight/MITRE rollups.
+  - `kill_chain_stage` — normalized stage key (spaces → underscores, lowercased); must be one of the keys accepted by the server (see `main._mitre_kill_chain_stage_tactics`).
+- **Pagination**: `page` (≥ 1), `limit` (1–200, default 50).
+- **Response**: `filter_type`, `filter_value`, `cluster_ids` (clusters contributing to the filter), `total_events`, `page`, `limit`, `total_pages`, `events` (rows with `index`, `timestamp`, IPs, `dest_port`, `subsystem`, `action`, `severity`, truncated `content`).
+- **Errors**: `400` if zero or more than one filter parameter is provided, unknown `kill_chain_stage`, or invalid `page`/`limit`; `404` if model missing.
 
 ---
 
@@ -583,6 +595,7 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 | `GET /insights/{job_id}/cluster/{cluster_id}` | One cluster’s `insights`, `risk_assessment`, `profile`, `sample_events`. |
 | `GET /insights/{job_id}/iocs` | Aggregated IOCs and suggested rules (§9.6). |
 | `GET /insights/{job_id}/mitre` | Recomputes insights and builds tactic/technique rollups, kill-chain narrative, mitigation suggestions (`main` helpers). |
+| `GET /insights/{job_id}/mitre/events` | Events whose clusters match one tactic, technique, or kill-chain stage filter (§2.17). |
 
 ---
 
@@ -590,7 +603,7 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 
 - **Constants**: `API_BASE = 'http://localhost:8000/api'`.
 - **Interfaces**: `TrainingRequest`, `TrainingProgress`, `SecurityEvent`, `ClusterResult`, `FileUploadResponse`, `AnalysisResponse`, plus extended types for insights, IOCs, MITRE (`InsightsResponse`, `IOCsResponse`, `MITREResponse`, etc.).
-- **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping` — each maps to the corresponding REST path documented in §2.
+- **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping`, `getMITREEvents` — each maps to the corresponding REST path documented in §2 (including §2.17 for MITRE-filtered events).
 
 ---
 
@@ -623,6 +636,8 @@ This section documents the **React** (Webpack-bundled SPA) frontend under `front
 | Bootstrap | `frontend/src/index.tsx` | `createRoot` → `<App />`, imports `src/globals.css`. |
 | Main UI | `frontend/src/App.tsx` | Interactive logic and API polling. |
 | API client | `frontend/lib/api.ts` | `fetch` wrappers; base URL `http://localhost:8000/api`. |
+| Visualization shell | `frontend/components/visualization-tab.tsx` | `React.lazy` + `Suspense` around `ClusterVisualization`; Progress fallback (§12.9a). |
+| IOC downloads | `frontend/lib/ioc-export.ts` | JSON/CSV/firewall-text exports for IOCs tab (§12.9b). |
 | Shared UI | `frontend/components/ui/*` | shadcn-style primitives (`Button`, `Card`, `Tabs`, `Badge`, `Progress`, `ScrollArea`, `Slider`, `Select`, `Tooltip`, etc.). |
 
 ### 12.2 Application state machine (`AppState`)
@@ -639,7 +654,7 @@ The root component `App` uses:
 | `completed` | Poll sees `status === 'completed'` and `getResults` succeeds | Summary metrics, intrinsic metric cards, tabbed results. |
 | `error` | `startTraining` throws, or poll sees `failed`, or other hard failures | Error card + **Try Again** (`handleReset`). |
 
-### 12.3 Root component state variables (`page.tsx`)
+### 12.3 Root component state variables (`App.tsx`)
 
 | State | Type | Purpose |
 |-------|------|---------|
@@ -654,6 +669,7 @@ The root component `App` uses:
 | `results` | `AnalysisResponse \| null` | From `getResults(jobId)` when training completes. |
 | `insights` | `InsightsResponse \| null` | From `getSecurityInsights(jobId)` after results. |
 | `insightsLoading` | `boolean` | While insights request in flight. |
+| `resultsTab` | `string` | Active results tab (`insights` \| `visualization` \| `clusters` \| `threats`); **controlled** `Tabs` value so heavy UI mounts only when needed (§12.9a). Reset to `insights` when `jobId` changes. |
 | `error` | `string \| null` | User-visible error message. |
 
 ### 12.4 Effects and async workflow
@@ -748,7 +764,24 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 **Behavior**
 
 - `useMemo` transforms: PCA scatter from `latent_visualization.points`, threat pie/bar data from `summary.threat_distribution`, cluster sizes, subsystem aggregation.
-- Renders **Recharts** (`ScatterChart`, `PieChart`, `BarChart`, etc.) inside `Card` components — read-only; no custom mouse handlers beyond library tooltips.
+- **Scatter performance**: if `points.length` exceeds a fixed cap (4,000), the component **evenly subsamples** points for rendering so Recharts does not block the main thread on very large jobs; the card description notes how many points are shown vs total.
+- Renders **Recharts** (`ScatterChart`, `PieChart`, `BarChart`, etc.) inside `Card` components — read-only; tooltips via Recharts only.
+- Loaded **only** through the lazy shell in §12.9a (not in the main bundle’s eager graph).
+
+### 12.9a Lazy-loaded visualization shell (`App.tsx`, `visualization-tab.tsx`)
+
+- **`react.lazy`** + **`Suspense`** wrap `ClusterVisualization` in `frontend/components/visualization-tab.tsx`. The Recharts-heavy module is emitted as a **separate Webpack chunk**, so initial load stays smaller.
+- **Fallback UI**: card with short copy and a **Progress** bar whose value animates while the chunk loads and charts initialize.
+- **`App.tsx`** uses **controlled** `Tabs` (`value={resultsTab}`, `onValueChange={setResultsTab}`). The visualization panel renders `<VisualizationTab data={results} />` **only when** `resultsTab === 'visualization'` **and** results exist, so inactive tabs do not mount the chart tree (Radix would otherwise keep hidden content mounted).
+- **`useEffect` on `jobId`**: resets `resultsTab` to `insights` when the training job changes so users do not stay on a stale Visualization tab.
+
+### 12.9b IOC export helpers (`frontend/lib/ioc-export.ts`)
+
+- **Purpose**: Client-side downloads for the **IOCs** tab (see §12.11), using data already returned by `GET /insights/{job_id}/iocs`.
+- **`exportIOCsJson`**: pretty-printed JSON file (`iocs-{job_id}.json`).
+- **`exportIOCsCsvFile`**: multi-section CSV with comment/header rows for malicious IPs, attack patterns, suspicious users, and firewall rule rows.
+- **`exportFirewallRulesFile`**: text file (`firewall-suggestions-{job_id}.txt`) with human-readable rule summaries plus an embedded JSON block of `firewall_rules` (or an explicit empty-rules payload when none were generated).
+- **`downloadBlob`**: shared helper to trigger browser downloads.
 
 ### 12.10 `ClusterDetails` (`frontend/components/cluster-details.tsx`)
 
@@ -775,24 +808,30 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 **Props**
 
 - `data: InsightsData | null` (local interface mirroring API), `loading: boolean`.
+- **`jobId?: string`** — when set (passed from `App` as the current training job id), enables enriched MITRE data, IOC fetch, and MITRE-related event drill-down.
 
 **State**
 
-- `selectedInsight`, `activeTab` (`overview`, etc.).
+- `selectedInsight`, `activeTab` (e.g. `overview`, MITRE, IOCs, correlations).
+- **MITRE**: `mitreDetail` / `mitreLoading` / `mitreError` from `getMITREMapping(jobId)` when `jobId` and `data` are present.
+- **MITRE event popup**: `mitrePopup` (dialog open state + title/description + filter), `mitrePopupEvents` / loading / error from `getMITREEvents(jobId, { …filter, page, limit })`.
+- **IOCs**: `iocsData` / `iocsLoading` / `iocsError`; `getIOCs(jobId)` runs when the **IOCs** tab becomes active.
 
 **Behavior**
 
 - Loading skeleton when `loading && !data`.
-- Tabbed sections: executive summary, insight list, correlations, threat landscape — driven by `data.insights`, `correlations`, `executive_summary`, `threat_landscape`.
-- Clicking an insight sets `selectedInsight` for detail panes (pattern varies by tab implementation).
+- Tabbed sections: executive summary, insight list, **MITRE ATT&CK** (tactics/techniques coverage, kill chain, mitigation priorities when `mitreDetail` loads), correlations, threat landscape, **IOCs**.
+- **Enriched MITRE UI**: dashboard cards and charts driven by `MITREResponse`; interactive elements can **open a dialog** and load **`/insights/{job_id}/mitre/events`** with exactly one of `tactic`, `technique`, or `kill_chain_stage` to show a **paginated table** of backing events (with page navigation).
+- **IOCs tab**: lists threat IPs from the IOC payload (with tooltips) when available, else falls back to `executive_summary.top_threat_actors`; **Export as JSON**, **Export as CSV**, and **Generate Firewall Rules** call §12.9b helpers (buttons disabled until `getIOCs` succeeds).
+- Clicking an insight sets `selectedInsight` where applicable for detail panes.
 
 ### 12.12 Results view composition (`state === 'completed'`)
 
 - **Summary row**: total events, clusters, critical/high counts from `results.summary`.
 - **Intrinsic row**: Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)` (computed on **refined hard** labels + latent; for **UFCM** they do not summarize fuzzy overlap—see §6A.7).
-- **Tabs** (`defaultValue="insights"`):
-  - **Security Insights** → `SecurityInsights` with `insights` + `insightsLoading`.
-  - **Visualization** → `ClusterVisualization data={results}`.
+- **Tabs** (**controlled**: `value={resultsTab}`, `onValueChange={setResultsTab}`; see §12.3 / §12.9a):
+  - **Security Insights** → `SecurityInsights` with `insights`, `insightsLoading`, and **`jobId={jobId ?? undefined}`** so MITRE/IOCs/API drill-downs work.
+  - **Visualization** → `VisualizationTab` (lazy `ClusterVisualization`) only while the Visualization tab is selected.
   - **Cluster Details** → scrollable `ClusterDetails` with `jobId`.
   - **Threat Analysis** → inline cards (top indicators, priority clusters filtered by threat level).
 
@@ -803,7 +842,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 3. User uploads file → `onEventsLoaded` → parent stores events + filename → Step 2 appears.
 4. User adjusts model/hyperparameters → **Start Training** → `handleStartTraining` → API returns `job_id`.
 5. Poll loop updates progress until complete → results + insights fetched.
-6. User explores tabs / expands clusters / scrolls event pages.
+6. User explores tabs (including lazy-loaded Visualization, MITRE drill-down with event popup, IOC exports) / expands clusters / scrolls event pages.
 7. **New Analysis** → reset to idle.
 
 ### 12.14 Error handling and edge cases
@@ -813,6 +852,8 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 - **Polling `AbortError`**: ignored (expected on cleanup or superseded request).
 - **Insights failure after success**: logged; UI may show empty insights with loading false.
 - **Cluster events API failure**: falls back to representative events for first page.
+- **MITRE events popup failure**: error string in dialog; user can dismiss or retry depending on UI state.
+- **IOCs fetch failure**: error banner with **Retry** on the IOCs tab; exports stay disabled until load succeeds.
 
 ---
 
