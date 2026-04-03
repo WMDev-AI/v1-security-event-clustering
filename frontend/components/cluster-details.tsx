@@ -1,32 +1,32 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useCallback } from "react"
 import {
   Shield,
   AlertTriangle,
   Network,
   Server,
-  User,
   Clock,
   ChevronDown,
   ChevronRight,
-  ExternalLink,
-} from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
+  Table2,
+} from "lucide-react"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { ScrollArea } from "@/components/ui/scroll-area"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import type { ClusterResult, SecurityEvent } from '@/lib/api'
-import { getClusterEvents } from '@/lib/api'
-import { cn } from '@/lib/utils'
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import type { ClusterResult, SecurityEvent } from "@/lib/api"
+import { getClusterEvents } from "@/lib/api"
+import { cn } from "@/lib/utils"
+
+const POPUP_PAGE_SIZE = 50
 
 interface ClusterDetailsProps {
   clusters: ClusterResult[]
@@ -34,7 +34,7 @@ interface ClusterDetailsProps {
 }
 
 function ThreatBadge({ level }: { level: string }) {
-  const variant = level as 'critical' | 'high' | 'medium' | 'low' | 'info'
+  const variant = level as "critical" | "high" | "medium" | "low" | "info"
   return (
     <Badge variant={variant} className="uppercase text-[10px]">
       {level}
@@ -42,83 +42,56 @@ function ThreatBadge({ level }: { level: string }) {
   )
 }
 
+type ClusterEventsPayload = Awaited<ReturnType<typeof getClusterEvents>>
+
 function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: string }) {
   const [isExpanded, setIsExpanded] = useState(false)
-  const [displayedEvents, setDisplayedEvents] = useState<SecurityEvent[]>([])
-  const [totalEvents, setTotalEvents] = useState(0)
-  const [currentPage, setCurrentPage] = useState(1)
-  const [totalPages, setTotalPages] = useState(0)
-  const [isLoadingMore, setIsLoadingMore] = useState(false)
-  const [hasLoadedInitial, setHasLoadedInitial] = useState(false)
-  const scrollAreaRef = useRef<HTMLDivElement>(null)
-  const loaderRef = useRef<HTMLDivElement>(null)
-  const PAGE_SIZE = 30
+  const [eventsDialogOpen, setEventsDialogOpen] = useState(false)
+  const [clusterEventsData, setClusterEventsData] = useState<ClusterEventsPayload | null>(null)
+  const [clusterEventsLoading, setClusterEventsLoading] = useState(false)
+  const [clusterEventsError, setClusterEventsError] = useState<string | null>(null)
 
-  // Load initial events on expansion
-  useEffect(() => {
-    if (isExpanded && jobId && !hasLoadedInitial) {
-      setHasLoadedInitial(true)
-      loadPage(1)
-    }
-  }, [isExpanded, jobId, hasLoadedInitial])
-
-  // Load a specific page
-  const loadPage = useCallback(async (pageNum: number) => {
-    if (!jobId) return
-    
-    try {
-      setIsLoadingMore(true)
-      const response = await getClusterEvents(jobId, cluster.cluster_id, pageNum, PAGE_SIZE)
-      
-      if (pageNum === 1) {
-        // First page - replace with representative events then loaded events
-        setDisplayedEvents(response.events)
-      } else {
-        // Subsequent pages - append to existing
-        setDisplayedEvents(prev => [...prev, ...response.events])
+  const loadClusterEventsPage = useCallback(
+    async (page: number) => {
+      if (!jobId) return
+      setClusterEventsLoading(true)
+      setClusterEventsError(null)
+      try {
+        const res = await getClusterEvents(jobId, cluster.cluster_id, page, POPUP_PAGE_SIZE)
+        setClusterEventsData(res)
+      } catch (err) {
+        setClusterEventsError(
+          err instanceof Error ? err.message : "Failed to load cluster events"
+        )
+        setClusterEventsData(null)
+      } finally {
+        setClusterEventsLoading(false)
       }
-      
-      setTotalEvents(response.total_events)
-      setTotalPages(response.total_pages)
-      setCurrentPage(pageNum)
-    } catch (error) {
-      console.error('Failed to load cluster events:', error)
-      // On error, fall back to representative events for first page
-      if (pageNum === 1) {
-        setDisplayedEvents(cluster.representative_events)
-      }
-    } finally {
-      setIsLoadingMore(false)
+    },
+    [jobId, cluster.cluster_id]
+  )
+
+  const openEventsDialog = () => {
+    setEventsDialogOpen(true)
+    void loadClusterEventsPage(1)
+  }
+
+  const closeEventsDialog = (open: boolean) => {
+    setEventsDialogOpen(open)
+    if (!open) {
+      setClusterEventsData(null)
+      setClusterEventsError(null)
     }
-  }, [jobId, cluster.cluster_id, cluster.representative_events])
-
-  // Load more on scroll
-  useEffect(() => {
-    if (!scrollAreaRef.current || !isExpanded || isLoadingMore) return
-
-    const scrollElement = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
-    if (!scrollElement) return
-
-    const handleScroll = () => {
-      // Check if user scrolled near bottom (within 200px)
-      const isNearBottom = 
-        scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 200
-
-      if (isNearBottom && currentPage < totalPages && !isLoadingMore) {
-        loadPage(currentPage + 1)
-      }
-    }
-
-    scrollElement.addEventListener('scroll', handleScroll)
-    return () => scrollElement.removeEventListener('scroll', handleScroll)
-  }, [currentPage, totalPages, isLoadingMore, isExpanded, loadPage])
+  }
 
   return (
-    <Card className={cn(
-      "transition-all",
-      cluster.threat_level === 'critical' && "border-red-500/50",
-      cluster.threat_level === 'high' && "border-orange-500/50"
-    )}>
+    <Card
+      className={cn(
+        "transition-all",
+        cluster.threat_level === "critical" && "border-red-500/50",
+        cluster.threat_level === "high" && "border-orange-500/50"
+      )}
+    >
       <CardHeader
         className="cursor-pointer pb-3"
         onClick={() => setIsExpanded(!isExpanded)}
@@ -137,7 +110,7 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
               {cluster.primary_subsystems.length > 0 && (
                 <span className="flex items-center gap-1">
                   <Shield className="h-3 w-3" />
-                  {cluster.primary_subsystems.join(', ')}
+                  {cluster.primary_subsystems.join(", ")}
                 </span>
               )}
             </CardDescription>
@@ -154,7 +127,6 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
 
       {isExpanded && (
         <CardContent className="pt-0 space-y-4">
-          {/* Threat Indicators */}
           {cluster.threat_indicators.length > 0 && (
             <div>
               <h4 className="text-sm font-medium mb-2 flex items-center gap-1.5">
@@ -163,7 +135,10 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
               </h4>
               <ul className="space-y-1">
                 {cluster.threat_indicators.map((indicator, i) => (
-                  <li key={i} className="text-sm text-muted-foreground pl-5 relative before:content-['•'] before:absolute before:left-1.5">
+                  <li
+                    key={i}
+                    className="text-sm text-muted-foreground pl-5 relative before:content-['•'] before:absolute before:left-1.5"
+                  >
                     {indicator}
                   </li>
                 ))}
@@ -171,7 +146,6 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             </div>
           )}
 
-          {/* Network Info */}
           <div className="grid gap-4 sm:grid-cols-2">
             {cluster.top_source_ips.length > 0 && (
               <div>
@@ -208,7 +182,6 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             )}
           </div>
 
-          {/* Actions */}
           {cluster.primary_actions.length > 0 && (
             <div>
               <h4 className="text-sm font-medium mb-2">Actions</h4>
@@ -222,7 +195,6 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             </div>
           )}
 
-          {/* Recommendations */}
           {cluster.recommended_actions.length > 0 && (
             <div className="bg-muted/50 rounded-lg p-3">
               <h4 className="text-sm font-medium mb-2">Recommended Actions</h4>
@@ -239,121 +211,144 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
             </div>
           )}
 
-          {/* Events Table with Lazy Loading */}
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-sm font-medium flex items-center gap-1.5">
-                <Clock className="h-4 w-4" />
-                Cluster Events {totalEvents > 0 && `(${displayedEvents.length}/${totalEvents})`}
-              </h4>
-              {isLoadingMore && (
-                <span className="text-xs text-muted-foreground flex items-center gap-1">
-                  <div className="w-3 h-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                  Loading...
-                </span>
-              )}
+          <div className="rounded-lg border bg-muted/30 p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <Clock className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+              <div>
+                <h4 className="text-sm font-medium">Cluster events</h4>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {jobId
+                    ? `Open a full-screen table with pagination (${cluster.size.toLocaleString()} events in this cluster).`
+                    : "Job id is required to load events from the API."}
+                </p>
+              </div>
             </div>
-
-            <div className="border rounded-lg overflow-hidden">
-              <ScrollArea ref={scrollAreaRef} className="w-full h-[500px]">
-                {displayedEvents.length > 0 ? (
-                  <>
-                    <Table className="text-xs">
-                      <TableHeader className="sticky top-0 bg-muted/80 z-10">
-                        <TableRow>
-                          <TableHead className="w-12">#</TableHead>
-                          <TableHead className="w-24">Timestamp</TableHead>
-                          <TableHead className="w-20">Source IP</TableHead>
-                          <TableHead className="w-20">Dest IP</TableHead>
-                          <TableHead className="w-12">Port</TableHead>
-                          <TableHead className="w-16">Subsystem</TableHead>
-                          <TableHead className="w-16">Action</TableHead>
-                          <TableHead className="w-12">Severity</TableHead>
-                          <TableHead>Content</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {displayedEvents.map((event: SecurityEvent, i: number) => (
-                          <TableRow key={i} className="hover:bg-muted/50">
-                            <TableCell className="font-mono text-xs">{i + 1}</TableCell>
-                            <TableCell className="font-mono text-xs truncate">
-                              {event.timestamp ? new Date(event.timestamp).toLocaleString('en-US', {
-                                month: '2-digit',
-                                day: '2-digit',
-                                hour: '2-digit',
-                                minute: '2-digit',
-                                second: '2-digit',
-                                hour12: false
-                              }) : '-'}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs truncate" title={event.source_ip}>
-                              {event.source_ip || '-'}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs truncate" title={event.dest_ip}>
-                              {event.dest_ip || '-'}
-                            </TableCell>
-                            <TableCell className="font-mono text-xs">
-                              {event.dest_port || '-'}
-                            </TableCell>
-                            <TableCell className="text-xs">
-                              {event.subsystem && (
-                                <Badge variant="outline" className="text-xs px-1 py-0">
-                                  {event.subsystem}
-                                </Badge>
-                              )}
-                              {!event.subsystem && '-'}
-                            </TableCell>
-                            <TableCell className="text-xs">
-                              {event.action && (
-                                <Badge variant="secondary" className="text-xs px-1 py-0">
-                                  {event.action}
-                                </Badge>
-                              )}
-                              {!event.action && '-'}
-                            </TableCell>
-                            <TableCell className="text-xs">
-                              {event.severity && (
-                                <Badge 
-                                  variant={event.severity.toLowerCase() as 'critical' | 'high' | 'medium' | 'low' | 'info'} 
-                                  className="text-xs px-1 py-0"
-                                >
-                                  {event.severity}
-                                </Badge>
-                              )}
-                              {!event.severity && '-'}
-                            </TableCell>
-                            <TableCell className="text-xs truncate max-w-xs" title={event.content}>
-                              {event.content || '-'}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-
-                    {/* Loading indicator at bottom */}
-                    {isLoadingMore && (
-                      <div ref={loaderRef} className="flex items-center justify-center py-4">
-                        <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-                      </div>
-                    )}
-
-                    {/* End of results message */}
-                    {currentPage >= totalPages && totalEvents > 0 && (
-                      <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
-                        End of results ({totalEvents} total events)
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="flex items-center justify-center h-full text-xs text-muted-foreground">
-                    No events available for this cluster
-                  </div>
-                )}
-              </ScrollArea>
-            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="shrink-0 gap-1.5"
+              disabled={!jobId}
+              onClick={(e) => {
+                e.stopPropagation()
+                openEventsDialog()
+              }}
+            >
+              <Table2 className="h-4 w-4" />
+              View events
+            </Button>
           </div>
         </CardContent>
       )}
+
+      <Dialog open={eventsDialogOpen} onOpenChange={closeEventsDialog}>
+        <DialogContent className="max-w-[96vw] md:max-w-6xl max-h-[90vh] flex flex-col gap-0 p-6">
+          <DialogHeader>
+            <DialogTitle>Cluster {cluster.cluster_id} — events</DialogTitle>
+            <DialogDescription>
+              Paginated security events assigned to this cluster (same layout as MITRE related
+              events).
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 pt-2 overflow-hidden flex flex-col min-h-0 flex-1">
+            {clusterEventsData && (
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline">
+                  {clusterEventsData.total_events.toLocaleString()} events
+                </Badge>
+                <Badge variant="outline">Cluster C{cluster.cluster_id}</Badge>
+                <Badge variant="outline">
+                  Page {clusterEventsData.page} / {clusterEventsData.total_pages}
+                </Badge>
+              </div>
+            )}
+
+            {clusterEventsLoading && (
+              <div className="flex items-center justify-center py-12 text-muted-foreground">
+                <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full animate-spin mr-2" />
+                Loading cluster events…
+              </div>
+            )}
+
+            {clusterEventsError && !clusterEventsLoading && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                {clusterEventsError}
+              </div>
+            )}
+
+            {!clusterEventsLoading && !clusterEventsError && clusterEventsData && (
+              <>
+                <ScrollArea className="h-[56vh] rounded-md border">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
+                      <tr className="text-left">
+                        <th className="px-3 py-2 font-medium w-[70px]">#</th>
+                        <th className="px-3 py-2 font-medium w-[170px]">Time</th>
+                        <th className="px-3 py-2 font-medium w-[140px]">Source</th>
+                        <th className="px-3 py-2 font-medium w-[160px]">Destination</th>
+                        <th className="px-3 py-2 font-medium w-[90px]">Port</th>
+                        <th className="px-3 py-2 font-medium w-[120px]">Subsystem</th>
+                        <th className="px-3 py-2 font-medium w-[120px]">Action</th>
+                        <th className="px-3 py-2 font-medium w-[100px]">Severity</th>
+                        <th className="px-3 py-2 font-medium">Content</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clusterEventsData.events.map((e: SecurityEvent & { index?: number }, rowIdx) => (
+                        <tr
+                          key={e.index !== undefined ? `i-${e.index}` : `p${clusterEventsData.page}-r${rowIdx}`}
+                          className="border-t border-border/50 align-top"
+                        >
+                          <td className="px-3 py-2 text-xs text-muted-foreground">
+                            {e.index ?? "—"}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.timestamp || "-"}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.source_ip || "-"}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.dest_ip || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.dest_port ?? "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.subsystem || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.action || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.severity || "-"}</td>
+                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.content || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </ScrollArea>
+
+                <div className="flex items-center justify-between">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={
+                      clusterEventsData.page <= 1 || clusterEventsLoading || !jobId
+                    }
+                    onClick={() => void loadClusterEventsPage(clusterEventsData.page - 1)}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    Showing {clusterEventsData.events.length} rows
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={
+                      clusterEventsData.page >= clusterEventsData.total_pages ||
+                      clusterEventsLoading ||
+                      !jobId
+                    }
+                    onClick={() => void loadClusterEventsPage(clusterEventsData.page + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }
@@ -366,27 +361,19 @@ export function ClusterDetails({ clusters, jobId }: ClusterDetailsProps) {
     return orderA - orderB || b.size - a.size
   })
 
-  const criticalCount = clusters.filter(c => c.threat_level === 'critical').length
-  const highCount = clusters.filter(c => c.threat_level === 'high').length
+  const criticalCount = clusters.filter((c) => c.threat_level === "critical").length
+  const highCount = clusters.filter((c) => c.threat_level === "high").length
 
   return (
     <div className="space-y-4">
-      {/* Summary */}
       <div className="flex items-center gap-4 text-sm">
-        <span className="text-muted-foreground">
-          {clusters.length} clusters analyzed
-        </span>
-        {criticalCount > 0 && (
-          <Badge variant="critical">{criticalCount} Critical</Badge>
-        )}
-        {highCount > 0 && (
-          <Badge variant="high">{highCount} High Risk</Badge>
-        )}
+        <span className="text-muted-foreground">{clusters.length} clusters analyzed</span>
+        {criticalCount > 0 && <Badge variant="critical">{criticalCount} Critical</Badge>}
+        {highCount > 0 && <Badge variant="high">{highCount} High Risk</Badge>}
       </div>
 
-      {/* Cluster Cards */}
       <div className="space-y-3">
-        {sortedClusters.map(cluster => (
+        {sortedClusters.map((cluster) => (
           <ClusterCard key={cluster.cluster_id} cluster={cluster} jobId={jobId} />
         ))}
       </div>
