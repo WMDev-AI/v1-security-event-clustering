@@ -15,7 +15,7 @@ User Input (Raw Events)
         ↓
 Event Parser (feature extraction)
         ↓
-Deep Clustering Models (DEC/IDEC/VaDE/Contrastive)
+Deep Clustering Models (DEC/IDEC/VaDE/Contrastive/UFCM)
         ↓
 Cluster Analysis (threat assessment)
         ↓
@@ -60,7 +60,7 @@ API Responses (visualizations, recommendations)
 
 **Purpose:** Learn cluster assignments from unlabeled data using deep learning.
 
-The system supports **4 clustering approaches**:
+The system supports **5 clustering approaches**:
 
 #### Model Comparison
 
@@ -70,6 +70,7 @@ The system supports **4 clustering approaches**:
 | **IDEC** | DEC + reconstruction loss | Better representations | Combines clustering + quality |
 | **VaDE** | VAE + Gaussian Mixture Model | Probabilistic clustering | Handles uncertainty, robust |
 | **Contrastive** | Contrastive learning (SimCLR-style) | Robust features | Learns invariant representations |
+| **UFCM** | Deep UC-FCM (unconstrained fuzzy c-means in latent space) | Overlapping / soft boundaries | Optimal fuzzy memberships from centers + gradient descent (TPAMI 2025) |
 
 #### Deep Embedded Clustering (DEC)
 
@@ -1019,7 +1020,7 @@ config = TrainingConfig(
 
 The backend is a sophisticated deep learning pipeline for unsupervised security event clustering with integrated threat intelligence generation. Key strengths:
 
-✅ Multiple clustering algorithms (DEC, IDEC, VaDE, Contrastive)
+✅ Multiple clustering algorithms (DEC, IDEC, VaDE, Contrastive, UFCM)
 ✅ Automatic feature extraction from semi-structured logs
 ✅ Two-phase training (pretraining + fine-tuning)
 ✅ Rich security analysis (threat scoring, MITRE mapping, IOCs)

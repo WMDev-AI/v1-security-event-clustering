@@ -563,6 +563,105 @@ class ContrastiveDeepClustering(nn.Module):
         return loss
 
 
+class DeepUFCM(nn.Module):
+    """
+    Deep Unconstrained Fuzzy C-Means (UC-FCM / UFCM).
+
+    Uses the equivalent unconstrained formulation of Fuzzy C-Means where, for fixed
+    cluster centers, the optimal fuzzy membership matrix is substituted into the
+    objective. The resulting loss is minimized by gradient descent over centers (and
+    optionally the encoder), as in UC-FCM (IEEE TPAMI, 2025).
+
+    FCM uses fuzziness parameter m > 1. Memberships satisfy the usual probabilistic
+    constraint sum_k u_ik = 1 per sample, computed from Euclidean distances in latent space.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_clusters: int,
+        hidden_dims: list[int] = None,
+        latent_dim: int = 32,
+        dropout: float = 0.2,
+        fuzziness_m: float = 2.0,
+    ):
+        super().__init__()
+        if fuzziness_m <= 1.0:
+            raise ValueError("fuzziness_m must be > 1 for Fuzzy C-Means (UFCM)")
+        self.n_clusters = n_clusters
+        self.latent_dim = latent_dim
+        self.fuzziness_m = float(fuzziness_m)
+
+        if hidden_dims is None:
+            hidden_dims = [256, 128, 64]
+
+        self.autoencoder = SecurityEventAutoEncoder(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            latent_dim=latent_dim,
+            dropout=dropout,
+        )
+        self.cluster_centers = nn.Parameter(
+            torch.zeros(n_clusters, latent_dim, dtype=torch.float32)
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return self.autoencoder.encode(x)
+
+    def squared_distances(self, z: torch.Tensor) -> torch.Tensor:
+        """Pairwise squared Euclidean distances between z and cluster centers."""
+        diff = z.unsqueeze(1) - self.cluster_centers.unsqueeze(0)
+        return (diff * diff).sum(dim=-1)
+
+    def fuzzy_membership(self, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Optimal FCM membership u_ik given current centers (standard FCM update),
+        differentiable w.r.t. z and cluster_centers.
+        Returns (u, squared_distances) both shape [batch, n_clusters].
+        """
+        sq = self.squared_distances(z)
+        dist = torch.sqrt(sq + 1e-8)
+        m = self.fuzziness_m
+        pow_val = 2.0 / (m - 1.0)
+        inv = dist.pow(-pow_val)
+        denom = inv.sum(dim=1, keepdim=True).clamp(min=1e-10)
+        u = inv / denom
+        return u, sq
+
+    def ufcm_objective(self, z: torch.Tensor) -> torch.Tensor:
+        """FCM objective J = mean_i sum_k u_ik^m ||z_i - v_k||^2 with optimal u given centers."""
+        u, sq = self.fuzzy_membership(z)
+        m = self.fuzziness_m
+        return (u.pow(m) * sq).sum(dim=1).mean()
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        z, x_recon = self.autoencoder(x)
+        u, _ = self.fuzzy_membership(z)
+        return u, z, x_recon
+
+    def initialize_clusters(self, data_loader: DataLoader, device: torch.device):
+        """Initialize cluster centers with K-means on latent codes (same strategy as DEC)."""
+        self.eval()
+        latent_vectors = []
+
+        with torch.no_grad():
+            for batch in data_loader:
+                if isinstance(batch, (list, tuple)):
+                    x = batch[0].to(device)
+                else:
+                    x = batch.to(device)
+                z = self.encode(x)
+                latent_vectors.append(z.cpu().numpy())
+
+        latent_vectors = np.concatenate(latent_vectors, axis=0)
+        kmeans = KMeans(n_clusters=self.n_clusters, n_init=20, random_state=42)
+        labels = kmeans.fit_predict(latent_vectors)
+        self.cluster_centers.data = torch.tensor(
+            kmeans.cluster_centers_, dtype=torch.float32, device=device
+        )
+        return labels
+
+
 # Loss functions for deep clustering
 
 def reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor) -> torch.Tensor:

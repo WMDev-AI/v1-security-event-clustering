@@ -2,7 +2,7 @@ const API_BASE = 'http://localhost:8000/api';
 
 export interface TrainingRequest {
   events: string[];
-  model_type: 'dec' | 'idec' | 'vade' | 'contrastive';
+  model_type: 'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm';
   n_clusters: number;
   latent_dim: number;
   hidden_dims: number[];

@@ -23,7 +23,7 @@ from deep_clustering import (
     DeepEmbeddedClustering,
     ImprovedDEC,
     VaDE,
-    ContrastiveDeepClustering
+    ContrastiveDeepClustering,
 )
 from trainer import DeepClusteringTrainer, TrainingConfig, ModelType, ClusteringMetrics
 from cluster_analyzer import ClusterAnalyzer, analyze_clusters_from_results, ClusterProfile
@@ -68,6 +68,7 @@ class ModelTypeEnum(str, Enum):
     IDEC = "idec"
     VADE = "vade"
     CONTRASTIVE = "contrastive"
+    UFCM = "ufcm"
 
 
 class TrainingRequest(BaseModel):
@@ -334,6 +335,11 @@ async def list_models():
                 "id": "contrastive",
                 "name": "Contrastive Deep Clustering",
                 "description": "Uses contrastive learning for robust representations"
+            },
+            {
+                "id": "ufcm",
+                "name": "Deep Unconstrained Fuzzy C-Means (UFCM)",
+                "description": "UC-FCM objective in latent space: gradient descent on fuzzy clustering with optimal memberships given centers, plus optional reconstruction regularization"
             }
         ]
     }

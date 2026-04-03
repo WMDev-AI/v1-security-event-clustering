@@ -62,12 +62,19 @@ const MODEL_INFO = {
     description: 'Uses contrastive learning for robust feature extraction before clustering.',
     pros: ['Noise resistant', 'Strong features'],
     best_for: 'Noisy data or when augmentation helps'
+  },
+  ufcm: {
+    name: 'Deep Unconstrained Fuzzy C-Means (UFCM)',
+    description:
+      'UC-FCM-style fuzzy clustering in latent space: optimal memberships from current centers, optimized by gradient descent (IEEE TPAMI 2025), with light reconstruction regularization.',
+    pros: ['Soft memberships', 'Smooth optimization vs alternating FCM'],
+    best_for: 'Overlapping clusters and gradual threat behavior boundaries'
   }
 }
 
 export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEvents, preloadedFilename }: TrainingConfigProps) {
   const [events, setEvents] = useState<string>(preloadedEvents?.join('\n') || '')
-  const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive'>('idec')
+  const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm'>('idec')
   const [nClusters, setNClusters] = useState(10)
   const [latentDim, setLatentDim] = useState(32)
   const [pretrainEpochs, setPretrainEpochs] = useState(30)
