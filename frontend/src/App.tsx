@@ -408,7 +408,11 @@ export default function App() {
               </TabsList>
 
               <TabsContent value="insights">
-                <SecurityInsights data={insights} loading={insightsLoading} />
+                <SecurityInsights
+                  data={insights}
+                  loading={insightsLoading}
+                  jobId={jobId ?? undefined}
+                />
               </TabsContent>
 
               <TabsContent value="visualization">

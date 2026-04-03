@@ -1,12 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
-import type { SecurityEvent } from "@/lib/api";
+import { Progress } from "@/components/ui/progress";
+import { getMITREMapping, type MITREResponse, type SecurityEvent } from "@/lib/api";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+} from "recharts";
+import {
+  Crosshair,
+  GitBranch,
+  Layers,
+  ShieldAlert,
+  Target,
+} from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -74,6 +91,8 @@ interface InsightsData {
 interface SecurityInsightsProps {
   data: InsightsData | null;
   loading: boolean;
+  /** When set, loads `/insights/{jobId}/mitre` for the enriched MITRE ATT&CK dashboard */
+  jobId?: string;
 }
 
 const severityColors: Record<string, string> = {
@@ -92,9 +111,52 @@ const categoryIcons: Record<string, string> = {
   misconfiguration: "Settings",
 };
 
-export function SecurityInsights({ data, loading }: SecurityInsightsProps) {
+function overallRiskStyles(risk: string): string {
+  const r = (risk || "").toLowerCase();
+  if (r === "critical") return "border-red-500/60 bg-red-500/10 text-red-200";
+  if (r === "high") return "border-orange-500/60 bg-orange-500/10 text-orange-200";
+  if (r === "medium") return "border-amber-500/60 bg-amber-500/10 text-amber-100";
+  if (r === "low") return "border-sky-500/60 bg-sky-500/10 text-sky-100";
+  return "border-muted bg-muted/50 text-muted-foreground";
+}
+
+function formatKillStage(stage: string): string {
+  return stage
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps) {
   const [selectedInsight, setSelectedInsight] = useState<SecurityInsight | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
+  const [mitreDetail, setMitreDetail] = useState<MITREResponse | null>(null);
+  const [mitreLoading, setMitreLoading] = useState(false);
+  const [mitreError, setMitreError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!jobId || !data) {
+      setMitreDetail(null);
+      setMitreError(null);
+      return;
+    }
+    let cancelled = false;
+    setMitreLoading(true);
+    setMitreError(null);
+    getMITREMapping(jobId)
+      .then((res) => {
+        if (!cancelled) setMitreDetail(res);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setMitreError(err.message || "Failed to load MITRE mapping");
+      })
+      .finally(() => {
+        if (!cancelled) setMitreLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, data?.job_id]);
 
   if (loading) {
     return (
@@ -498,47 +560,381 @@ export function SecurityInsights({ data, loading }: SecurityInsightsProps) {
           </div>
         </TabsContent>
 
-        <TabsContent value="mitre" className="mt-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Card className="bg-card">
-              <CardHeader>
-                <CardTitle>MITRE ATT&CK Tactics</CardTitle>
-                <CardDescription>Detected attack tactics mapped to the MITRE framework</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {executive_summary.mitre_coverage?.tactics?.map((tactic, idx) => (
-                    <div key={idx} className="p-3 rounded-lg bg-muted flex items-center justify-between">
-                      <span className="font-medium">{tactic}</span>
-                      <Badge variant="outline">Detected</Badge>
-                    </div>
-                  )) || (
-                    <div className="text-muted-foreground">No tactics detected</div>
-                  )}
-                </div>
+        <TabsContent value="mitre" className="mt-4 space-y-4">
+          {mitreLoading && (
+            <Card className="bg-card border-dashed">
+              <CardContent className="flex items-center justify-center gap-3 py-12">
+                <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <span className="text-muted-foreground">Loading MITRE ATT&CK coverage from API…</span>
               </CardContent>
             </Card>
+          )}
 
-            <Card className="bg-card">
-              <CardHeader>
-                <CardTitle>MITRE ATT&CK Techniques</CardTitle>
-                <CardDescription>Specific techniques identified in the analysis</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ScrollArea className="h-64">
+          {mitreError && (
+            <Card className="bg-card border-amber-500/40">
+              <CardContent className="py-4 text-sm text-amber-200/90">
+                {mitreError} — showing executive-summary MITRE lists only below.
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Summary strip — from /insights/{job}/mitre when available */}
+          {mitreDetail && !mitreLoading && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Card className="bg-card border-border/80">
+                  <CardHeader className="pb-2">
+                    <CardDescription className="flex items-center gap-1.5">
+                      <Layers className="h-3.5 w-3.5" />
+                      Tactics (enterprise)
+                    </CardDescription>
+                    <CardTitle className="text-2xl tabular-nums">{mitreDetail.total_tactics}</CardTitle>
+                  </CardHeader>
+                </Card>
+                <Card className="bg-card border-border/80">
+                  <CardHeader className="pb-2">
+                    <CardDescription className="flex items-center gap-1.5">
+                      <Crosshair className="h-3.5 w-3.5" />
+                      Techniques
+                    </CardDescription>
+                    <CardTitle className="text-2xl tabular-nums">{mitreDetail.total_techniques}</CardTitle>
+                  </CardHeader>
+                </Card>
+                <Card className="bg-card border-border/80">
+                  <CardHeader className="pb-2">
+                    <CardDescription className="flex items-center gap-1.5">
+                      <ShieldAlert className="h-3.5 w-3.5" />
+                      Overall risk
+                    </CardDescription>
+                    <CardTitle className="text-lg">
+                      <span
+                        className={`inline-flex rounded-md border px-2 py-0.5 font-semibold ${overallRiskStyles(
+                          mitreDetail.coverage_assessment?.overall_risk || ""
+                        )}`}
+                      >
+                        {mitreDetail.coverage_assessment?.overall_risk || "—"}
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+                <Card className="bg-card border-border/80">
+                  <CardHeader className="pb-2">
+                    <CardDescription className="flex items-center gap-1.5">
+                      <Target className="h-3.5 w-3.5" />
+                      High-impact tactic coverage
+                    </CardDescription>
+                    <CardTitle className="text-2xl tabular-nums">
+                      {Math.round(mitreDetail.coverage_assessment?.high_impact_coverage ?? 0)}%
+                    </CardTitle>
+                  </CardHeader>
+                </Card>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Card className="bg-card">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <GitBranch className="h-4 w-4 text-primary" />
+                      Kill chain view
+                    </CardTitle>
+                    <CardDescription>
+                      {mitreDetail.kill_chain_analysis?.assessment || "Assessment from detected tactics"}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div>
+                      <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
+                        <span>Attack progression (stages represented)</span>
+                        <span className="tabular-nums">
+                          {Math.round(mitreDetail.kill_chain_analysis?.attack_progression ?? 0)}%
+                        </span>
+                      </div>
+                      <Progress
+                        value={Math.min(100, Math.max(0, mitreDetail.kill_chain_analysis?.attack_progression ?? 0))}
+                        className="h-2"
+                      />
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-2">Stages with matching tactic families</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(mitreDetail.kill_chain_analysis?.stages_detected || []).length > 0 ? (
+                          mitreDetail.kill_chain_analysis.stages_detected.map((s) => (
+                            <Badge key={s} variant="secondary" className="font-normal">
+                              {formatKillStage(s)}
+                            </Badge>
+                          ))
+                        ) : (
+                          <span className="text-sm text-muted-foreground">No kill-chain stages inferred</span>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card className="bg-card">
+                  <CardHeader>
+                    <CardTitle className="text-base">High-impact tactics detected</CardTitle>
+                    <CardDescription>
+                      Subset of enterprise tactics considered high impact for SOC prioritization
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {(mitreDetail.coverage_assessment?.high_impact_tactics_detected || []).length > 0 ? (
+                        mitreDetail.coverage_assessment.high_impact_tactics_detected.map((t) => (
+                          <Badge key={t} variant="outline" className="border-orange-500/50 text-orange-100/90">
+                            {t}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-sm text-muted-foreground">None in the high-impact watchlist</span>
+                      )}
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                        <span>Share of watchlist tactics seen</span>
+                        <span>
+                          {mitreDetail.coverage_assessment?.high_impact_tactics_detected?.length ?? 0} / 5
+                        </span>
+                      </div>
+                      <Progress
+                        value={Math.min(
+                          100,
+                          Math.max(0, mitreDetail.coverage_assessment?.high_impact_coverage ?? 0)
+                        )}
+                        className="h-2"
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Event-weighted tactics */}
+              {(() => {
+                const chartData = Object.entries(mitreDetail.tactics_coverage || {})
+                  .map(([tactic, info]) => ({
+                    label: tactic.length > 22 ? `${tactic.slice(0, 20)}…` : tactic,
+                    full: tactic,
+                    events: info.event_count,
+                  }))
+                  .sort((a, b) => b.events - a.events)
+                  .slice(0, 14);
+                if (chartData.length === 0) return null;
+                return (
+                  <Card className="bg-card">
+                    <CardHeader>
+                      <CardTitle className="text-base">Tactic exposure by event weight</CardTitle>
+                      <CardDescription>
+                        Aggregated insight-level event counts per MITRE tactic (heuristic mapping from cluster
+                        insights)
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="h-[280px] w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData} layout="vertical" margin={{ left: 8, right: 16, top: 8, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" className="stroke-muted/40" horizontal={false} />
+                          <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
+                          <YAxis
+                            type="category"
+                            dataKey="label"
+                            width={120}
+                            tick={{ fontSize: 10 }}
+                            interval={0}
+                          />
+                          <RechartsTooltip
+                            formatter={(value: number) => [value, "Weighted events"]}
+                            labelFormatter={(_, payload) => {
+                              const p = payload as { payload?: { full?: string } }[] | undefined;
+                              return p?.[0]?.payload?.full != null ? String(p[0].payload.full) : "";
+                            }}
+                            contentStyle={{
+                              backgroundColor: "hsl(var(--card))",
+                              border: "1px solid hsl(var(--border))",
+                              borderRadius: "8px",
+                              fontSize: "12px",
+                            }}
+                          />
+                          <Bar dataKey="events" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </CardContent>
+                  </Card>
+                );
+              })()}
+
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <Card className="bg-card">
+                  <CardHeader>
+                    <CardTitle className="text-base">Tactics → techniques & insight titles</CardTitle>
+                    <CardDescription>Per-tactic rollup from cluster insight analysis</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-[320px] pr-3">
+                      <div className="space-y-3">
+                        {Object.entries(mitreDetail.tactics_coverage || {}).length > 0 ? (
+                          Object.entries(mitreDetail.tactics_coverage)
+                            .sort((a, b) => b[1].event_count - a[1].event_count)
+                            .map(([tactic, info]) => (
+                              <div
+                                key={tactic}
+                                className="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2"
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <span className="font-medium text-sm leading-snug">{tactic}</span>
+                                  <Badge variant="secondary" className="shrink-0 tabular-nums">
+                                    {info.event_count} evt
+                                  </Badge>
+                                </div>
+                                {info.techniques?.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {info.techniques.map((tech) => (
+                                      <Badge key={tech} variant="outline" className="text-xs font-mono font-normal">
+                                        {tech}
+                                      </Badge>
+                                    ))}
+                                  </div>
+                                )}
+                                {info.insights?.length > 0 && (
+                                  <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-0.5">
+                                    {info.insights.slice(0, 5).map((title) => (
+                                      <li key={title}>{title}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </div>
+                            ))
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No tactic buckets in this run</p>
+                        )}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+
+                <Card className="bg-card">
+                  <CardHeader>
+                    <CardTitle className="text-base">Techniques → clusters</CardTitle>
+                    <CardDescription>Technique strings with contributing clusters and event weight</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-[320px] pr-3">
+                      <div className="space-y-2">
+                        {Object.entries(mitreDetail.techniques_detected || {}).length > 0 ? (
+                          Object.entries(mitreDetail.techniques_detected)
+                            .sort((a, b) => b[1].event_count - a[1].event_count)
+                            .map(([technique, info]) => (
+                              <div
+                                key={technique}
+                                className="rounded-md border border-border/50 bg-background/50 p-2.5 flex flex-col gap-1.5"
+                              >
+                                <div className="flex justify-between gap-2">
+                                  <span className="text-sm font-mono leading-tight">{technique}</span>
+                                  <Badge variant="secondary" className="shrink-0 tabular-nums text-xs">
+                                    {info.event_count}
+                                  </Badge>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {(info.clusters || []).map((c) => (
+                                    <Badge key={c} variant="outline" className="text-[10px] px-1.5 py-0">
+                                      C{c}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              </div>
+                            ))
+                        ) : (
+                          <p className="text-sm text-muted-foreground">No techniques extracted</p>
+                        )}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {mitreDetail.mitigation_priorities?.length > 0 && (
+                <Card className="bg-card border-primary/20">
+                  <CardHeader>
+                    <CardTitle className="text-base">Mitigation priorities</CardTitle>
+                    <CardDescription>
+                      Template recommendations keyed to known technique IDs (see backend mapping)
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {(mitreDetail.mitigation_priorities ?? []).map((row) => (
+                        <div
+                          key={row.technique}
+                          className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2"
+                        >
+                          <div className="flex justify-between gap-2">
+                            <span className="text-sm font-mono font-medium leading-snug">{row.technique}</span>
+                            <Badge variant="outline" className="shrink-0 tabular-nums">
+                              {row.event_count} evt
+                            </Badge>
+                          </div>
+                          <ul className="text-xs text-muted-foreground space-y-1 list-disc pl-4">
+                            {(row.recommended_mitigations || []).map((m, i) => (
+                              <li key={i}>{m}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </>
+          )}
+
+          {/* Fallback: executive summary lists when detailed MITRE API unavailable */}
+          {!mitreLoading && (!mitreDetail || mitreError) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Card className="bg-card">
+                <CardHeader>
+                  <CardTitle>MITRE ATT&CK Tactics</CardTitle>
+                  <CardDescription>Executive summary — detected tactic names</CardDescription>
+                </CardHeader>
+                <CardContent>
                   <div className="space-y-2">
-                    {executive_summary.mitre_coverage?.techniques?.map((technique, idx) => (
-                      <div key={idx} className="p-2 rounded-lg bg-muted">
-                        <span className="text-sm">{technique}</span>
+                    {executive_summary.mitre_coverage?.tactics?.map((tactic, idx) => (
+                      <div key={idx} className="p-3 rounded-lg bg-muted flex items-center justify-between">
+                        <span className="font-medium">{tactic}</span>
+                        <Badge variant="outline">Detected</Badge>
                       </div>
                     )) || (
-                      <div className="text-muted-foreground">No techniques detected</div>
+                      <div className="text-muted-foreground">No tactics in executive summary</div>
                     )}
                   </div>
-                </ScrollArea>
-              </CardContent>
-            </Card>
-          </div>
+                </CardContent>
+              </Card>
+
+              <Card className="bg-card">
+                <CardHeader>
+                  <CardTitle>MITRE ATT&CK Techniques</CardTitle>
+                  <CardDescription>Executive summary — technique strings</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ScrollArea className="h-64">
+                    <div className="space-y-2">
+                      {executive_summary.mitre_coverage?.techniques?.map((technique, idx) => (
+                        <div key={idx} className="p-2 rounded-lg bg-muted">
+                          <span className="text-sm">{technique}</span>
+                        </div>
+                      )) || (
+                        <div className="text-muted-foreground">No techniques in executive summary</div>
+                      )}
+                    </div>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {!jobId && !mitreLoading && (
+            <p className="text-xs text-center text-muted-foreground">
+              Detailed MITRE coverage loads when a training job id is available (completed run).
+            </p>
+          )}
         </TabsContent>
 
         <TabsContent value="correlations" className="mt-4">
