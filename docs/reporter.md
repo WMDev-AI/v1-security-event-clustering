@@ -12,7 +12,7 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 |--------|-----------|------|
 | API gateway | `backend/main.py` | FastAPI app mounted at `/api`; CORS; job orchestration; insight endpoints |
 | Featurization | `backend/event_parser.py` | Parse `key=value` logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
-| Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive modules and loss helpers |
+| Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive / **DeepUFCM** modules and loss helpers |
 | Training & metrics | `backend/trainer.py` | `DeepClusteringTrainer`, `TrainingConfig`, `ClusteringMetrics`, latent refinement |
 | Cluster narratives | `backend/cluster_analyzer.py` | `ClusterProfile`, per-cluster stats, summaries |
 | SOC intelligence | `backend/security_insights.py` | `SecurityInsightsEngine`, MITRE-style insights, correlations |
@@ -69,13 +69,13 @@ Base URL (default): `http://localhost:8000/api`
 
 - **Request**: none.
 - **Response**: `{ "models": [ { "id", "name", "description" }, ... ] }`  
-  - `id`: `dec` | `idec` | `vade` | `contrastive`.
+  - `id`: `dec` | `idec` | `vade` | `contrastive` | `ufcm`.
 
 ### 2.4 `POST /train`
 
 - **Request body** (`TrainingRequest`):
   - `events` (string[], required) — raw lines; **minimum 100** events.
-  - `model_type` — `dec` | `idec` | `vade` | `contrastive` (default `idec`).
+  - `model_type` — `dec` | `idec` | `vade` | `contrastive` | `ufcm` (default `idec`).
   - `n_clusters` (int, 2–100) — must satisfy `n_clusters <= len(events) // 10`.
   - `latent_dim` (int, 8–256).
   - `hidden_dims` (int[]) — encoder/decoder widths.
@@ -107,7 +107,7 @@ Base URL (default): `http://localhost:8000/api`
 
 - **Request** (`PredictRequest`): `job_id`, `events` (string[]).
 - **Response**: `{ "predictions": [ { "event_index", "cluster_id", "confidence", "probabilities", "event_summary" }, ... ] }`  
-  - `probabilities`: per-cluster soft scores (list of float).  
+  - `probabilities`: per-cluster soft scores (list of float). For **UFCM**, these are **fuzzy membership** weights (non-negative, typically summing to $\approx 1$ per row, same shape as other models’ soft vectors).  
   - `event_summary`: subset of parsed fields.
 - **Note**: Features are normalized with **batch** mean/std of the provided events (same helper as training path for new data).
 - **Errors**: `404` if job/model missing.
@@ -170,7 +170,7 @@ These are defined in `backend/main.py` unless noted.
 
 ### 3.1 `ModelTypeEnum`
 
-- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE` → serialized as lowercase strings for JSON.
+- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM` → serialized as lowercase strings for JSON.
 
 ### 3.2 `TrainingRequest`
 
@@ -226,7 +226,7 @@ These are defined in `backend/main.py` unless noted.
   3. `pretraining` — async `pretrain_callback` updates epoch loss and progress (~0–50% overall).
   4. `initialization` — `initialize_clusters`; `init_callback` maps 0–100% stage to ~50–75% overall.
   5. `fine-tuning` — `finetune` with metric callback; overall progress uses same band as callback implementation.
-  6. `postprocessing` — `predict` → `get_latent_representations` → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` → `get_cluster_probabilities`.
+  6. `postprocessing` — `predict` → `get_latent_representations` → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` → `get_cluster_probabilities` (for **UFCM**, each row is **fuzzy membership** over clusters; **refined** hard `labels` may differ from `argmax(probs)` when refinement accepts a better partition).
   7. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`.
   8. Mark `completed`, final `ClusteringMetrics.compute_all` on refined labels + latent.
 - **Callbacks**: `refine_progress_callback` updates `stage_progress` and overall `progress` (95–100%), logs to stdout, `await asyncio.sleep(0.05)` for event-loop yield.
@@ -245,11 +245,11 @@ These are defined in `backend/main.py` unless noted.
 
 ### 5.1 `ModelType` (Enum)
 
-- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE` (string values match API).
+- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM` (string values match API).
 
 ### 5.2 `TrainingConfig` (dataclass)
 
-- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC `alpha`, `gamma`, `update_interval`, `tol`, VaDE `beta`, contrastive `temperature`, `weight_decay`, `device`.
+- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC `alpha`, `gamma`, `update_interval`, `tol`, VaDE `beta`, contrastive `temperature`, **UFCM** `fuzziness_m` ($>1$, FCM fuzzifier, default `2.0`), `ufcm_recon_weight` (MSE reconstruction scale on $x$, default `0.1`), `weight_decay`, `device`.
 - **`__post_init__`**: default `hidden_dims` to `[256, 128, 64]` if `None`.
 
 ### 5.3 `ClusteringMetrics`
@@ -269,14 +269,14 @@ These are defined in `backend/main.py` unless noted.
 | Method | Parameters | Role / flow |
 |--------|------------|-------------|
 | `__init__` | `input_dim`, `model_type`, `config` | `_create_model()`, move to device |
-| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or contrastive pretrain; updates `history` |
-| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; contrastive path has multi-init K-means with progress |
-| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, metrics)` | Main clustering loop; DEC/IDEC target distribution; periodic `_evaluate` |
+| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or **UFCM** (autoencoder only) or contrastive pretrain; updates `history` |
+| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; **UFCM** uses `DeepUFCM.initialize_clusters` (K-means on $z$ → `cluster_centers`); contrastive path has multi-init K-means with progress |
+| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, metrics)` | Main clustering loop; DEC/IDEC target distribution; **UFCM** batch loss $(u^m \odot d^2)$ mean + `ufcm_recon_weight` * MSE recon; periodic `_evaluate` |
 | `refine_cluster_assignments` | `latent`, `initial_labels`, optional hyperparams, async `progress_callback` | Scaled latent; K-means/GMM/agglomerative trials; sampled Silhouette; time budget; returns best labels + info dict |
 | `predict` | `data` | Hard labels from model soft assignments |
 | `get_cluster_probabilities` | `data` | Soft assignment matrix |
 | `get_latent_representations` | `data` | Encoder outputs $z$ |
-| `get_cluster_centers` | — | DEC/IDEC/VaDE centers if defined |
+| `get_cluster_centers` | — | DEC/IDEC/VaDE/**UFCM** centers if defined (`DeepUFCM.cluster_centers`) |
 | `save_model` / `load_model` | path | Torch checkpoint |
 
 #### Private helpers
@@ -334,6 +334,78 @@ These are defined in `backend/main.py` unless noted.
 
 - **Members**: `encoder` (subset of autoencoder), `projection_head`, `cluster_head`, `n_clusters`, `temperature`.
 - **Methods**: `encode`, `forward` → `(z, proj, cluster_prob)`, `contrastive_loss(proj1, proj2)` (NT-Xent-style).
+
+### 6.10 `DeepUFCM`
+
+- **Purpose**: **Deep Unconstrained Fuzzy C-Means** — fuzzy clustering in **latent space** with the UC-FCM-style reduction (optimal fuzzy memberships as a function of centers, objective minimized by gradient descent over centers and encoder). See **§6A** for narrative and formulas.
+- **Members**: `autoencoder` (`SecurityEventAutoEncoder`), `cluster_centers` (`nn.Parameter`, shape `[n_clusters, latent_dim]`), `n_clusters`, `latent_dim`, `fuzziness_m` (Python float, must be $>1$).
+- **Methods**:
+  - `encode(x)` → $z$.
+  - `squared_distances(z)` → $\lVert z_i - v_k\rVert_2^2$ per batch element.
+  - `fuzzy_membership(z)` → `(u, sq)` where $u_{ik}$ are standard **FCM** memberships from Euclidean distances (rows sum to $1$).
+  - `ufcm_objective(z)` → batch mean of $\sum_k u_{ik}^{m} d_{ik}^2$ (used where a single scalar is needed; `trainer.finetune` inlines one membership pass per batch for efficiency).
+  - `forward(x)` → `(u, z, x_recon)` with `u` from `fuzzy_membership(z)`.
+  - `initialize_clusters(data_loader, device)` — full pass for $z$, **sklearn KMeans** on $z$, copy centroids into `cluster_centers`; returns hard K-means labels (for logging only; fine-tuning then optimizes fuzzy objective).
+
+---
+
+## 6A. UFCM — extended reference (algorithm, stack integration, and semantics)
+
+This subsection is the **reporter-facing** companion to `docs/research.md` §6.5: same ideas, but tied to **files, API fields, and runtime behavior** in this repository.
+
+### 6A.1 What problem UFCM addresses here
+
+Security events often sit **between** behavioral prototypes (mixed tactics, noisy firewalls, auth storms that resemble credential attacks). **Hard** clustering forces one label per event; **fuzzy** clustering keeps a **distribution over clusters** per event. The implementation exposes that distribution through the same **`probs`** / **`probabilities`** channels as other models (`trainer.get_cluster_probabilities`, `trained_models[job_id]["probs"]`, `/predict` payloads). **Discrete** `labels` stored after training are produced by **latent ensemble refinement** starting from the model’s hard predictions (for UFCM, **argmax** of $u$ on the training forward pass); refinement may **change** some labels to improve intrinsic scores, so **`labels` need not equal `argmax(probs)`** row-wise. Profiles, insights, and displayed metrics use these **refined** `labels`; `probs` remain the **last forward-pass** soft matrix from the neural module (§6A.5, §4.2 step 6).
+
+### 6A.2 Classical FCM membership (what the code implements)
+
+For batch latent vectors $z_i$ and centers $v_k$, let $d_{ik}=\lVert z_i-v_k\rVert_2$ (with numerical flooring). Fuzziness $m>1$. Then:
+
+$u_{ik}=\dfrac{1}{\sum_{j=1}^{K}\left(\dfrac{d_{ik}}{d_{ij}}\right)^{\frac{2}{m-1}}}$
+
+Objective contribution per sample: $\sum_{k=1}^{K} u_{ik}^{m}\, d_{ik}^{2}$ (with $d_{ik}^2$ the squared distance). This matches the **standard FCM** membership at fixed centers; **UC-FCM** in the literature substitutes this $U^\star(V)$ into the full objective and optimizes **$V$** (here also $\theta$ for the encoder) by **gradient descent** instead of alternating full matrix updates. This codebase follows that **substitution + autograd** pattern in `DeepClusteringTrainer.finetune` for `ModelType.UFCM`.
+
+### 6A.3 Loss actually optimized in `trainer.py` (fine-tuning)
+
+Per batch:
+
+- $\mathcal{L}_{\mathrm{UFCM}} = \frac{1}{|\mathcal{B}|}\sum_{i\in\mathcal{B}}\sum_{k} u_{ik}^{m}\, d_{ik}^{2}$ with $u$ computed from current $z$ and `cluster_centers`.
+- $\mathcal{L}_{\mathrm{rec}} = \mathrm{MSE}(x,\hat{x})$ from the autoencoder decode path.
+- $\mathcal{L} = \mathcal{L}_{\mathrm{UFCM}} + \gamma_{\mathrm{ufcm}}\,\mathcal{L}_{\mathrm{rec}}$ with $\gamma_{\mathrm{ufcm}} =$ `TrainingConfig.ufcm_recon_weight`.
+
+**Pretraining** uses **only** reconstruction on the UFCM autoencoder (same pattern as DEC/IDEC backbone). There is **no** DEC-style target distribution or KL term for UFCM.
+
+### 6A.4 Configuration surface (today)
+
+| Knob | Type | Default | Where |
+|------|------|---------|--------|
+| `fuzziness_m` | float | `2.0` | `TrainingConfig`; must be $>1$ (`DeepUFCM` raises if not). |
+| `ufcm_recon_weight` | float | `0.1` | `TrainingConfig`; scales reconstruction vs fuzzy objective. |
+
+These are **not** yet exposed on the public `TrainingRequest` Pydantic model in `main.py`; jobs started via API use defaults unless the server code is extended. The **React** training UI exposes `model_type: "ufcm"` in the model `Select` and `TrainingRequest` TypeScript union (`frontend/lib/api.ts`, `training-config.tsx`).
+
+### 6A.5 API and persistence behavior
+
+- **`GET /api/models`**: includes an entry with `id: "ufcm"` and a short description (see `list_models` in `main.py`).
+- **`POST /api/train`**: `model_type: "ufcm"` selects `ModelType.UFCM` → `DeepUFCM` inside `_create_model`.
+- **`trained_models[job_id]["probs"]`**: rows are fuzzy memberships for the **training** feature matrix (shape `[N, K]`). After refinement, **`labels`** reflect the **refined** hard partition; **`probs`** remain those from **`get_cluster_probabilities`** on the **base** model before replacement by refinement labels — operators should treat **`labels`** as canonical for cluster IDs in profiles while using **`probs`** as **model-native softness** (this matches other models’ interaction with refinement; see `run_training` ordering in §4.2).
+
+### 6A.6 How UFCM differs from other families (quick matrix)
+
+| Aspect | DEC / IDEC | VaDE | Contrastive | **UFCM** |
+|--------|------------|------|-------------|----------|
+| Soft output | Student-$t$ $q$, KL to $p$ | GMM posterior $\gamma$ | `cluster_head` softmax | **FCM** $u_{ik}$ from distances |
+| Latent geometry pressure | KL (+ recon IDEC) | ELBO + mixture | Contrastive + consistency | **Weighted fuzzy distortion** + recon |
+| Centers | `ClusteringLayer` params | `mu_c` | implicit in head | **`cluster_centers`** in $\mathbb{R}^{m}$ |
+
+### 6A.7 Analyst and metrics caveats
+
+- **Silhouette / DBI / CH** in `/results` and job completion metrics are computed on **hard** labels and **latent** features; they **do not** encode full fuzzy overlap. High **entropy** of a row of `probs` can still flag “borderline” events in custom tooling.
+- **Security insights** (`§9`) consume **cluster_id** from hard labels only; they do not currently consume fuzzy weights.
+
+### 6A.8 Reference publication
+
+For citations and equivalence claims to **UC-FCM**, use the TPAMI 2025 paper (DOI `10.1109/TPAMI.2025.3532357`). Full theoretical discussion: `docs/research.md` §6.5–6.6.
 
 ---
 
@@ -641,7 +713,7 @@ Runs only when `jobId` is set **and** `state === 'training'`.
 
 **Local state**
 
-- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType`, `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
+- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType` (`'dec' \| 'idec' \| 'vade' \| 'contrastive' \| 'ufcm'`), `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
 
 **Validation**
 
@@ -653,7 +725,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 
 **UI**
 
-- Model `Select`, sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
+- Model `Select` (options driven from `MODEL_INFO`, including **UFCM** with tooltip copy), sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
 
 ### 12.8 `TrainingProgress` (`frontend/components/training-progress.tsx`)
 
@@ -717,7 +789,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 ### 12.12 Results view composition (`state === 'completed'`)
 
 - **Summary row**: total events, clusters, critical/high counts from `results.summary`.
-- **Intrinsic row**: Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)`.
+- **Intrinsic row**: Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)` (computed on **refined hard** labels + latent; for **UFCM** they do not summarize fuzzy overlap—see §6A.7).
 - **Tabs** (`defaultValue="insights"`):
   - **Security Insights** → `SecurityInsights` with `insights` + `insightsLoading`.
   - **Visualization** → `ClusterVisualization data={results}`.
