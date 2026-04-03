@@ -964,8 +964,6 @@ As adversaries continue to increase the volume and sophistication of their attac
 
 18. J. Zhang, S. Wang, and L. He, "Variational deep embedding-based active learning for the diagnosis of pneumonia," *Frontiers in Medicine*, vol. 16, p. 1059739, Nov. 2022.
 
-19. D. Novakovic, "Masterprüfung mit Defensio," University of Vienna, Sep. 2022.
-
 20. L. K. Suresh Kumar and M. A. Bari, "Zero-Day Attack Detection in Multi-Tenant Cloud Environments Using Variational Autoencoders," *International Journal of Advanced Manufacturing*, 2025.
 
 21. Y. Li, P. Hu, Z. Liu, D. Peng, J. T. Zhou, and X. Peng, "Contrastive clustering," in *Proc. AAAI Conference on Artificial Intelligence*, 2021, pp. 8547–8555.
@@ -1011,9 +1009,6 @@ As adversaries continue to increase the volume and sophistication of their attac
 42. D. Levshun and I. Kotenko, "A Hierarchical Security Event Correlation Model for Real-Time Threat Detection and Response," *Network*, vol. 4, no. 1, pp. 1–18, Feb. 2024.
 
 43. Y. Yuan, J. Zhang, and W. Chen, "Adaptive NAD: Online and Self-adaptive Unsupervised Network Anomaly Detector," *arXiv preprint*, arXiv:2507.11234, Jul. 2025.
-
-44. H. Zhang, Y. Liu, and J. Wang, "Relative Frequency-Rank Encoding for Unsupervised Network Anomaly Detection," *IEEE/ACM Transactions on Networking*, vol. 32, no. 4, pp. 3453–3467, May 2024.
-
 
 47. J. Wang, Y. Zhang, and L. Chen, "DUdetector: A dual-granularity unsupervised model for network anomaly detection," *Computer Networks*, vol. 255, Nov. 2024.
 
