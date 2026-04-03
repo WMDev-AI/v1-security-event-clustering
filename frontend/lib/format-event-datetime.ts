@@ -1,22 +1,16 @@
-/** Format API timestamps for event tables (date + time when available). */
+/** Fixed display for event tables: YYYY-MM-DD HH:mm:ss (24h, local time). */
+function pad2(n: number): string {
+  return String(n).padStart(2, "0")
+}
+
 export function formatEventDateTime(value: unknown): string {
   if (value == null || value === "") return "—"
   const raw = String(value).trim()
   if (!raw) return "—"
 
-  const parsed = Date.parse(raw)
-  if (!Number.isNaN(parsed)) {
-    const d = new Date(parsed)
-    return d.toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    })
-  }
+  const ms = Date.parse(raw)
+  if (Number.isNaN(ms)) return raw
 
-  return raw
+  const d = new Date(ms)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
 }

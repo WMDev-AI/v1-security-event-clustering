@@ -2,7 +2,7 @@
 Security Event Deep Clustering API
 FastAPI backend for processing and clustering security events
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile
+from fastapi import FastAPI, HTTPException, BackgroundTasks, File, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 
@@ -28,6 +28,12 @@ from deep_clustering import (
 from trainer import DeepClusteringTrainer, TrainingConfig, ModelType, ClusteringMetrics
 from cluster_analyzer import ClusterAnalyzer, analyze_clusters_from_results, ClusterProfile
 from security_insights import SecurityInsightsEngine, SecurityInsight, ClusterCorrelation
+from event_table_query import (
+    ALLOWED_SORT,
+    filter_sort_paginate,
+    parse_filter_params,
+    serialize_event_row,
+)
 
 from multiprocessing import Manager, Process
 
@@ -526,54 +532,72 @@ async def predict_clusters(request: PredictRequest):
 
 
 @app.get("/cluster-events/{job_id}/{cluster_id}")
-async def get_cluster_events(job_id: str, cluster_id: int, page: int = 1, limit: int = 30):
-    """Get paginated events belonging to a specific cluster"""
+async def get_cluster_events(
+    job_id: str,
+    cluster_id: int,
+    page: int = Query(1, ge=1),
+    limit: int = Query(30, ge=1, le=100),
+    sort_by: str = Query("index"),
+    sort_dir: str = Query("asc"),
+    f_index: Optional[str] = None,
+    f_timestamp: Optional[str] = None,
+    f_source_ip: Optional[str] = None,
+    f_dest_ip: Optional[str] = None,
+    f_dest_port: Optional[str] = None,
+    f_subsystem: Optional[str] = None,
+    f_action: Optional[str] = None,
+    f_severity: Optional[str] = None,
+    f_content: Optional[str] = None,
+):
+    """Paginated events in a cluster; optional global filter/sort over all cluster events."""
     if job_id not in trained_models:
         raise HTTPException(status_code=404, detail="Model not found")
-    
-    if page < 1 or limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="Invalid page or limit parameters")
-    
+
+    if str(sort_dir).lower() not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="sort_dir must be asc or desc")
+    sb = sort_by if sort_by in ALLOWED_SORT else "index"
+
     model_data = trained_models[job_id]
     labels = model_data["labels"]
     events = model_data["events"]
-    
-    # Get indices of events in this cluster
-    cluster_indices = [i for i, label in enumerate(labels) if label == cluster_id]
-    
+
+    cluster_indices = [i for i, label in enumerate(labels) if int(label) == cluster_id]
+
     if not cluster_indices:
         raise HTTPException(status_code=404, detail=f"Cluster {cluster_id} has no events")
-    
-    # Calculate pagination
-    total_events = len(cluster_indices)
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-    paginated_indices = cluster_indices[start_idx:end_idx]
-    
-    # Build event response
-    cluster_events = []
-    for idx in paginated_indices:
-        event = events[idx]
-        cluster_events.append({
-            "index": idx,
-            "timestamp": event.timestamp,
-            "source_ip": event.source_ip,
-            "dest_ip": event.dest_ip,
-            "dest_port": event.dest_port,
-            "subsystem": event.subsystem,
-            "action": event.action,
-            "severity": event.severity,
-            "content": event.content
-        })
-    
+
+    filters = parse_filter_params(
+        f_index=f_index,
+        f_timestamp=f_timestamp,
+        f_source_ip=f_source_ip,
+        f_dest_ip=f_dest_ip,
+        f_dest_port=f_dest_port,
+        f_subsystem=f_subsystem,
+        f_action=f_action,
+        f_severity=f_severity,
+        f_content=f_content,
+    )
+
+    cluster_events, total_matching = filter_sort_paginate(
+        cluster_indices,
+        events,
+        serialize_event_row,
+        page,
+        limit,
+        sb,
+        sort_dir,
+        filters,
+    )
+    total_pages = max(1, (total_matching + limit - 1) // limit) if total_matching else 1
+
     return {
         "job_id": job_id,
         "cluster_id": cluster_id,
-        "total_events": total_events,
+        "total_events": total_matching,
         "page": page,
         "limit": limit,
-        "total_pages": (total_events + limit - 1) // limit,
-        "events": cluster_events
+        "total_pages": total_pages,
+        "events": cluster_events,
     }
 
 
@@ -581,12 +605,23 @@ async def get_cluster_events(job_id: str, cluster_id: int, page: int = 1, limit:
 async def get_threat_indicator_events(
     job_id: str,
     indicator: str,
-    page: int = 1,
-    limit: int = 50,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    sort_by: str = Query("index"),
+    sort_dir: str = Query("asc"),
+    f_index: Optional[str] = None,
+    f_timestamp: Optional[str] = None,
+    f_source_ip: Optional[str] = None,
+    f_dest_ip: Optional[str] = None,
+    f_dest_port: Optional[str] = None,
+    f_subsystem: Optional[str] = None,
+    f_action: Optional[str] = None,
+    f_severity: Optional[str] = None,
+    f_content: Optional[str] = None,
 ):
     """
     Paginated events from all clusters whose profile includes this exact threat indicator string
-    (same strings as in summary top_threat_indicators).
+    (same strings as in summary top_threat_indicators). Filter/sort apply globally.
     """
     if job_id not in trained_models:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -594,8 +629,9 @@ async def get_threat_indicator_events(
     if not indicator or not indicator.strip():
         raise HTTPException(status_code=400, detail="indicator query parameter is required")
 
-    if page < 1 or limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="Invalid page or limit parameters")
+    if str(sort_dir).lower() not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="sort_dir must be asc or desc")
+    sb = sort_by if sort_by in ALLOWED_SORT else "index"
 
     indicator_key = indicator.strip()
     model_data = trained_models[job_id]
@@ -610,33 +646,36 @@ async def get_threat_indicator_events(
     matching_indices = sorted(
         i for i, lab in enumerate(labels) if int(lab) in matching_cluster_ids
     )
-    total_events = len(matching_indices)
-    total_pages = max(1, (total_events + limit - 1) // limit) if total_events else 1
 
-    start_idx = (page - 1) * limit
-    end_idx = start_idx + limit
-    paginated_indices = matching_indices[start_idx:end_idx]
+    filters = parse_filter_params(
+        f_index=f_index,
+        f_timestamp=f_timestamp,
+        f_source_ip=f_source_ip,
+        f_dest_ip=f_dest_ip,
+        f_dest_port=f_dest_port,
+        f_subsystem=f_subsystem,
+        f_action=f_action,
+        f_severity=f_severity,
+        f_content=f_content,
+    )
 
-    rows = []
-    for idx in paginated_indices:
-        event = events[idx]
-        rows.append({
-            "index": idx,
-            "timestamp": event.timestamp,
-            "source_ip": event.source_ip,
-            "dest_ip": event.dest_ip,
-            "dest_port": event.dest_port,
-            "subsystem": event.subsystem,
-            "action": event.action,
-            "severity": event.severity,
-            "content": event.content,
-        })
+    rows, total_matching = filter_sort_paginate(
+        matching_indices,
+        events,
+        serialize_event_row,
+        page,
+        limit,
+        sb,
+        sort_dir,
+        filters,
+    )
+    total_pages = max(1, (total_matching + limit - 1) // limit) if total_matching else 1
 
     return {
         "job_id": job_id,
         "indicator": indicator_key,
         "cluster_ids": sorted(matching_cluster_ids),
-        "total_events": total_events,
+        "total_events": total_matching,
         "page": page,
         "limit": limit,
         "total_pages": total_pages,
@@ -1487,32 +1526,30 @@ def _build_mitre_tactic_and_technique_cluster_maps(
     return tactic_to_clusters, technique_to_clusters
 
 
-def _serialize_event_table_row(index: int, event: SecurityEvent) -> dict:
-    return {
-        "index": index,
-        "timestamp": event.timestamp,
-        "source_ip": event.source_ip,
-        "dest_ip": event.dest_ip,
-        "dest_port": event.dest_port,
-        "subsystem": event.subsystem,
-        "action": event.action,
-        "severity": event.severity,
-        "content": (event.content or "")[:800],
-    }
-
-
 @app.get("/insights/{job_id}/mitre/events")
 async def get_mitre_related_events(
     job_id: str,
     tactic: Optional[str] = None,
     technique: Optional[str] = None,
     kill_chain_stage: Optional[str] = None,
-    page: int = 1,
-    limit: int = 50,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    sort_by: str = Query("index"),
+    sort_dir: str = Query("asc"),
+    f_index: Optional[str] = None,
+    f_timestamp: Optional[str] = None,
+    f_source_ip: Optional[str] = None,
+    f_dest_ip: Optional[str] = None,
+    f_dest_port: Optional[str] = None,
+    f_subsystem: Optional[str] = None,
+    f_action: Optional[str] = None,
+    f_severity: Optional[str] = None,
+    f_content: Optional[str] = None,
 ):
     """
     Return paginated security events whose clusters match a single MITRE filter:
     one enterprise tactic name, one technique string, or one kill-chain stage key.
+    Optional global filter/sort over all matching events.
     """
     if job_id not in trained_models:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -1524,8 +1561,9 @@ async def get_mitre_related_events(
             detail="Provide exactly one query parameter: tactic, technique, or kill_chain_stage",
         )
 
-    if page < 1 or limit < 1 or limit > 200:
-        raise HTTPException(status_code=400, detail="Invalid page or limit (limit max 200)")
+    if str(sort_dir).lower() not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="sort_dir must be asc or desc")
+    sb = sort_by if sort_by in ALLOWED_SORT else "index"
 
     model_data = trained_models[job_id]
     events: list = model_data["events"]
@@ -1567,18 +1605,36 @@ async def get_mitre_related_events(
     matching_indices = sorted(
         {i for i, lab in enumerate(labels) if int(lab) in cluster_ids}
     )
-    total_events = len(matching_indices)
-    total_pages = max(1, (total_events + limit - 1) // limit) if total_events else 1
-    start = (page - 1) * limit
-    page_indices = matching_indices[start : start + limit]
 
-    rows = [_serialize_event_table_row(idx, events[idx]) for idx in page_indices]
+    filters = parse_filter_params(
+        f_index=f_index,
+        f_timestamp=f_timestamp,
+        f_source_ip=f_source_ip,
+        f_dest_ip=f_dest_ip,
+        f_dest_port=f_dest_port,
+        f_subsystem=f_subsystem,
+        f_action=f_action,
+        f_severity=f_severity,
+        f_content=f_content,
+    )
+
+    rows, total_matching = filter_sort_paginate(
+        matching_indices,
+        events,
+        serialize_event_row,
+        page,
+        limit,
+        sb,
+        sort_dir,
+        filters,
+    )
+    total_pages = max(1, (total_matching + limit - 1) // limit) if total_matching else 1
 
     return {
         "filter_type": filter_type,
         "filter_value": filter_value,
         "cluster_ids": sorted(cluster_ids),
-        "total_events": total_events,
+        "total_events": total_matching,
         "page": page,
         "limit": limit,
         "total_pages": total_pages,

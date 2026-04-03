@@ -11,11 +11,13 @@ import {
   getMITREMapping,
   getMITREEvents,
   getIOCs,
+  DEFAULT_EVENT_TABLE_QUERY,
   type MITREResponse,
   type SecurityEvent,
   type MITREEventsResponse,
   type MitreEventFilter,
   type IOCsResponse,
+  type EventTableQuery,
 } from "@/lib/api";
 import {
   exportIOCsJson,
@@ -170,6 +172,7 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
   const [mitrePopupEvents, setMitrePopupEvents] = useState<MITREEventsResponse | null>(null);
   const [mitrePopupLoading, setMitrePopupLoading] = useState(false);
   const [mitrePopupError, setMitrePopupError] = useState<string | null>(null);
+  const [mitreTableQuery, setMitreTableQuery] = useState<EventTableQuery>(DEFAULT_EVENT_TABLE_QUERY);
   const [iocsData, setIocsData] = useState<IOCsResponse | null>(null);
   const [iocsLoading, setIocsLoading] = useState(false);
   const [iocsError, setIocsError] = useState<string | null>(null);
@@ -219,24 +222,32 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
     };
   }, [jobId, data?.job_id]);
 
-  const loadMitrePopupEvents = async (filter: MitreEventFilter, page = 1) => {
-    if (!jobId) return;
+  useEffect(() => {
+    if (!mitrePopup.open || !mitrePopup.filter || !jobId) return;
+    let cancelled = false;
     setMitrePopupLoading(true);
     setMitrePopupError(null);
-    try {
-      const res = await getMITREEvents(jobId, { ...filter, page, limit: 50 });
-      setMitrePopupEvents(res);
-    } catch (err) {
-      setMitrePopupError(err instanceof Error ? err.message : "Failed to load related events");
-      setMitrePopupEvents(null);
-    } finally {
-      setMitrePopupLoading(false);
-    }
-  };
+    getMITREEvents(jobId, { ...mitrePopup.filter, limit: 50 }, mitreTableQuery)
+      .then((res) => {
+        if (!cancelled) setMitrePopupEvents(res);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setMitrePopupError(err instanceof Error ? err.message : "Failed to load related events");
+          setMitrePopupEvents(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMitrePopupLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mitrePopup.open, mitrePopup.filter, jobId, mitreTableQuery]);
 
   const openMitrePopup = (title: string, description: string, filter: MitreEventFilter) => {
+    setMitreTableQuery(DEFAULT_EVENT_TABLE_QUERY);
     setMitrePopup({ open: true, title, description, filter });
-    void loadMitrePopupEvents(filter, 1);
   };
 
   if (loading) {
@@ -1267,6 +1278,7 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
           if (!open) {
             setMitrePopupEvents(null);
             setMitrePopupError(null);
+            setMitreTableQuery(DEFAULT_EVENT_TABLE_QUERY);
           }
         }}
       >
@@ -1315,9 +1327,8 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                 totalPages={Math.max(1, mitrePopupEvents.total_pages)}
                 totalEvents={mitrePopupEvents.total_events}
                 loading={mitrePopupLoading}
-                onPageChange={(p) => {
-                  void loadMitrePopupEvents(mitrePopup.filter!, p);
-                }}
+                query={mitreTableQuery}
+                onQueryChange={setMitreTableQuery}
                 disabled={!mitrePopup.filter}
               />
             )}

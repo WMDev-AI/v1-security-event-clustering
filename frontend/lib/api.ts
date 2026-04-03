@@ -123,12 +123,60 @@ export async function getResults(jobId: string): Promise<AnalysisResponse> {
   return res.json();
 }
 
+/** Column keys aligned with backend event_table_query.ALLOWED_SORT */
+export type EventTableSortColumn =
+  | 'index'
+  | 'timestamp'
+  | 'source_ip'
+  | 'dest_ip'
+  | 'dest_port'
+  | 'subsystem'
+  | 'action'
+  | 'severity'
+  | 'content';
+
+export interface EventTableQuery {
+  page: number;
+  sortBy: EventTableSortColumn;
+  sortDir: 'asc' | 'desc';
+  filters: Partial<Record<EventTableSortColumn, string>>;
+}
+
+export const DEFAULT_EVENT_TABLE_QUERY: EventTableQuery = {
+  page: 1,
+  sortBy: 'index',
+  sortDir: 'asc',
+  filters: {},
+};
+
+const F_PARAM: Record<EventTableSortColumn, string> = {
+  index: 'f_index',
+  timestamp: 'f_timestamp',
+  source_ip: 'f_source_ip',
+  dest_ip: 'f_dest_ip',
+  dest_port: 'f_dest_port',
+  subsystem: 'f_subsystem',
+  action: 'f_action',
+  severity: 'f_severity',
+  content: 'f_content',
+};
+
+export function appendEventTableQueryParams(params: URLSearchParams, q: EventTableQuery): void {
+  params.set('page', String(q.page));
+  params.set('sort_by', q.sortBy);
+  params.set('sort_dir', q.sortDir);
+  (Object.keys(q.filters) as EventTableSortColumn[]).forEach((col) => {
+    const v = q.filters[col]?.trim();
+    if (v) params.set(F_PARAM[col], v);
+  });
+}
+
 export async function getClusterEvents(
-  jobId: string, 
-  clusterId: number, 
-  page: number = 1, 
-  limit: number = 30
-): Promise<{ 
+  jobId: string,
+  clusterId: number,
+  limit: number,
+  query: EventTableQuery
+): Promise<{
   job_id: string;
   cluster_id: number;
   total_events: number;
@@ -137,7 +185,8 @@ export async function getClusterEvents(
   total_pages: number;
   events: SecurityEvent[];
 }> {
-  const params = new URLSearchParams({ page: page.toString(), limit: limit.toString() })
+  const params = new URLSearchParams({ limit: String(limit) });
+  appendEventTableQueryParams(params, query);
   const res = await fetch(`${API_BASE}/cluster-events/${jobId}/${clusterId}?${params}`);
   if (!res.ok) throw new Error('Failed to get cluster events');
   return res.json();
@@ -158,14 +207,14 @@ export interface ThreatIndicatorEventsResponse {
 export async function getThreatIndicatorEvents(
   jobId: string,
   indicator: string,
-  page: number = 1,
-  limit: number = 50
+  limit: number,
+  query: EventTableQuery
 ): Promise<ThreatIndicatorEventsResponse> {
   const params = new URLSearchParams({
     indicator,
-    page: String(page),
     limit: String(limit),
   });
+  appendEventTableQueryParams(params, query);
   const res = await fetch(`${API_BASE}/threat-indicator-events/${jobId}?${params}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -409,14 +458,15 @@ export type MitreEventFilter =
 
 export async function getMITREEvents(
   jobId: string,
-  params: MitreEventFilter & { page?: number; limit?: number }
+  params: MitreEventFilter & { limit?: number },
+  tableQuery: EventTableQuery
 ): Promise<MITREEventsResponse> {
   const search = new URLSearchParams();
   if (params.type === 'tactic') search.set('tactic', params.value);
   if (params.type === 'technique') search.set('technique', params.value);
   if (params.type === 'kill_chain_stage') search.set('kill_chain_stage', params.value);
-  if (params.page != null) search.set('page', String(params.page));
   if (params.limit != null) search.set('limit', String(params.limit));
+  appendEventTableQueryParams(search, tableQuery);
   const q = search.toString();
   const res = await fetch(`${API_BASE}/insights/${jobId}/mitre/events?${q}`);
   if (!res.ok) {

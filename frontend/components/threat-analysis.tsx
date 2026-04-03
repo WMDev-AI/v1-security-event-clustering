@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useEffect } from "react"
 import { AlertTriangle, CheckCircle2, Table2 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -17,7 +17,9 @@ import type { AnalysisResponse, ClusterResult } from "@/lib/api"
 import {
   getClusterEvents,
   getThreatIndicatorEvents,
+  DEFAULT_EVENT_TABLE_QUERY,
   type ThreatIndicatorEventsResponse,
+  type EventTableQuery,
 } from "@/lib/api"
 
 const PAGE_SIZE = 50
@@ -39,40 +41,45 @@ export function ThreatAnalysis({ data, jobId }: ThreatAnalysisProps) {
   const [eventsData, setEventsData] = useState<EventsPayload | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [eventQuery, setEventQuery] = useState<EventTableQuery>(DEFAULT_EVENT_TABLE_QUERY)
 
-  const loadPage = useCallback(
-    async (ctx: ThreatPopup, page: number) => {
-      if (!jobId) return
-      setLoading(true)
-      setError(null)
+  useEffect(() => {
+    if (!popup || !jobId) return
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    const run = async () => {
       try {
-        if (ctx.kind === "cluster") {
-          const res = await getClusterEvents(jobId, ctx.clusterId, page, PAGE_SIZE)
-          setEventsData(res)
+        if (popup.kind === "cluster") {
+          const res = await getClusterEvents(jobId, popup.clusterId, PAGE_SIZE, eventQuery)
+          if (!cancelled) setEventsData(res)
         } else {
-          const res = await getThreatIndicatorEvents(jobId, ctx.indicator, page, PAGE_SIZE)
-          setEventsData(res)
+          const res = await getThreatIndicatorEvents(jobId, popup.indicator, PAGE_SIZE, eventQuery)
+          if (!cancelled) setEventsData(res)
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load events")
-        setEventsData(null)
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load events")
+          setEventsData(null)
+        }
       } finally {
-        setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    },
-    [jobId]
-  )
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [popup, jobId, eventQuery])
 
   const openClusterEvents = (cluster: ClusterResult) => {
-    const p: ThreatPopup = { kind: "cluster", clusterId: cluster.cluster_id }
-    setPopup(p)
-    void loadPage(p, 1)
+    setEventQuery({ ...DEFAULT_EVENT_TABLE_QUERY })
+    setPopup({ kind: "cluster", clusterId: cluster.cluster_id })
   }
 
   const openIndicatorEvents = (indicator: string) => {
-    const p: ThreatPopup = { kind: "indicator", indicator }
-    setPopup(p)
-    void loadPage(p, 1)
+    setEventQuery({ ...DEFAULT_EVENT_TABLE_QUERY })
+    setPopup({ kind: "indicator", indicator })
   }
 
   const closeDialog = (open: boolean) => {
@@ -80,6 +87,7 @@ export function ThreatAnalysis({ data, jobId }: ThreatAnalysisProps) {
       setPopup(null)
       setEventsData(null)
       setError(null)
+      setEventQuery({ ...DEFAULT_EVENT_TABLE_QUERY })
     }
   }
 
@@ -238,7 +246,8 @@ export function ThreatAnalysis({ data, jobId }: ThreatAnalysisProps) {
                 totalPages={Math.max(1, eventsData.total_pages)}
                 totalEvents={eventsData.total_events}
                 loading={loading}
-                onPageChange={(p) => void loadPage(popup, p)}
+                query={eventQuery}
+                onQueryChange={setEventQuery}
                 disabled={!jobId}
               />
             )}

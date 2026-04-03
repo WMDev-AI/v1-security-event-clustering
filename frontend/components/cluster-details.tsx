@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useEffect } from "react"
 import {
   Shield,
   AlertTriangle,
@@ -22,7 +22,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import type { ClusterResult } from "@/lib/api"
-import { getClusterEvents } from "@/lib/api"
+import {
+  getClusterEvents,
+  DEFAULT_EVENT_TABLE_QUERY,
+  type EventTableQuery,
+} from "@/lib/api"
 import { EventsPopupTable } from "@/components/events-popup-table"
 import { cn } from "@/lib/utils"
 
@@ -50,37 +54,44 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
   const [clusterEventsData, setClusterEventsData] = useState<ClusterEventsPayload | null>(null)
   const [clusterEventsLoading, setClusterEventsLoading] = useState(false)
   const [clusterEventsError, setClusterEventsError] = useState<string | null>(null)
+  const [eventQuery, setEventQuery] = useState<EventTableQuery>(DEFAULT_EVENT_TABLE_QUERY)
 
-  const loadClusterEventsPage = useCallback(
-    async (page: number) => {
-      if (!jobId) return
-      setClusterEventsLoading(true)
-      setClusterEventsError(null)
-      try {
-        const res = await getClusterEvents(jobId, cluster.cluster_id, page, POPUP_PAGE_SIZE)
-        setClusterEventsData(res)
-      } catch (err) {
-        setClusterEventsError(
-          err instanceof Error ? err.message : "Failed to load cluster events"
-        )
-        setClusterEventsData(null)
-      } finally {
-        setClusterEventsLoading(false)
-      }
-    },
-    [jobId, cluster.cluster_id]
-  )
+  useEffect(() => {
+    if (!eventsDialogOpen || !jobId) return
+    let cancelled = false
+    setClusterEventsLoading(true)
+    setClusterEventsError(null)
+    getClusterEvents(jobId, cluster.cluster_id, POPUP_PAGE_SIZE, eventQuery)
+      .then((res) => {
+        if (!cancelled) setClusterEventsData(res)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setClusterEventsError(
+            err instanceof Error ? err.message : "Failed to load cluster events"
+          )
+          setClusterEventsData(null)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setClusterEventsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [eventsDialogOpen, jobId, eventQuery, cluster.cluster_id])
 
   const openEventsDialog = () => {
+    setEventQuery({ ...DEFAULT_EVENT_TABLE_QUERY })
     setEventsDialogOpen(true)
-    void loadClusterEventsPage(1)
   }
 
   const closeEventsDialog = (open: boolean) => {
-    setEventsDialogOpen(open)
     if (!open) {
+      setEventsDialogOpen(false)
       setClusterEventsData(null)
       setClusterEventsError(null)
+      setEventQuery({ ...DEFAULT_EVENT_TABLE_QUERY })
     }
   }
 
@@ -284,7 +295,8 @@ function ClusterCard({ cluster, jobId }: { cluster: ClusterResult; jobId?: strin
                 totalPages={Math.max(1, clusterEventsData.total_pages)}
                 totalEvents={clusterEventsData.total_events}
                 loading={clusterEventsLoading}
-                onPageChange={(p) => void loadClusterEventsPage(p)}
+                query={eventQuery}
+                onQueryChange={setEventQuery}
                 disabled={!jobId}
               />
             )}

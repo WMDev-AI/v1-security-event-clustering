@@ -1,72 +1,31 @@
 "use client"
 
-import { useMemo, useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type { SecurityEvent } from "@/lib/api"
+import type { SecurityEvent, EventTableQuery, EventTableSortColumn } from "@/lib/api"
 import { formatEventDateTime } from "@/lib/format-event-datetime"
 import { cn } from "@/lib/utils"
 
 export type EventTableRow = SecurityEvent & { index?: number }
 
-const COLUMNS = [
-  { key: "index" as const, label: "#", width: "w-[72px]" },
-  { key: "timestamp" as const, label: "Time", width: "min-w-[180px]" },
-  { key: "source_ip" as const, label: "Source", width: "min-w-[120px]" },
-  { key: "dest_ip" as const, label: "Destination", width: "min-w-[120px]" },
-  { key: "dest_port" as const, label: "Port", width: "w-[72px]" },
-  { key: "subsystem" as const, label: "Subsystem", width: "min-w-[100px]" },
-  { key: "action" as const, label: "Action", width: "min-w-[90px]" },
-  { key: "severity" as const, label: "Severity", width: "min-w-[80px]" },
-  { key: "content" as const, label: "Content", width: "min-w-[160px]" },
+const COLUMNS: { key: EventTableSortColumn; label: string; width: string }[] = [
+  { key: "index", label: "#", width: "w-[72px]" },
+  { key: "timestamp", label: "Time", width: "min-w-[180px]" },
+  { key: "source_ip", label: "Source", width: "min-w-[120px]" },
+  { key: "dest_ip", label: "Destination", width: "min-w-[120px]" },
+  { key: "dest_port", label: "Port", width: "w-[72px]" },
+  { key: "subsystem", label: "Subsystem", width: "min-w-[100px]" },
+  { key: "action", label: "Action", width: "min-w-[90px]" },
+  { key: "severity", label: "Severity", width: "min-w-[80px]" },
+  { key: "content", label: "Content", width: "min-w-[160px]" },
 ]
-
-type SortKey = (typeof COLUMNS)[number]["key"]
-
-function cellText(e: EventTableRow, key: SortKey): string {
-  switch (key) {
-    case "index":
-      return e.index !== undefined ? String(e.index) : ""
-    case "timestamp":
-      return e.timestamp != null ? String(e.timestamp) : ""
-    case "dest_port":
-      return e.dest_port != null ? String(e.dest_port) : ""
-    default:
-      return e[key] != null ? String(e[key]) : ""
-  }
-}
-
-function sortValue(e: EventTableRow, key: SortKey): number | string {
-  switch (key) {
-    case "index": {
-      const n = e.index
-      return typeof n === "number" ? n : parseInt(String(n), 10) || 0
-    }
-    case "dest_port": {
-      const p = e.dest_port
-      return typeof p === "number" ? p : parseInt(String(p), 10) || 0
-    }
-    case "timestamp": {
-      const t = e.timestamp
-      if (t == null) return 0
-      const ms = Date.parse(String(t))
-      return Number.isNaN(ms) ? String(t) : ms
-    }
-    default:
-      return cellText(e, key).toLowerCase()
-  }
-}
-
-function compare(a: EventTableRow, b: EventTableRow, key: SortKey, dir: 1 | -1): number {
-  const va = sortValue(a, key)
-  const vb = sortValue(b, key)
-  if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir
-  return String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: "base" }) * dir
-}
 
 const inputClass =
   "h-7 w-full min-w-0 rounded border border-input bg-background px-1.5 text-[11px] placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+
+const FILTER_DEBOUNCE_MS = 350
 
 export interface EventsPopupTableProps {
   events: EventTableRow[]
@@ -74,8 +33,9 @@ export interface EventsPopupTableProps {
   totalPages: number
   totalEvents: number
   loading?: boolean
-  onPageChange: (page: number) => void
   disabled?: boolean
+  query: EventTableQuery
+  onQueryChange: (next: EventTableQuery) => void
 }
 
 export function EventsPopupTable({
@@ -84,51 +44,63 @@ export function EventsPopupTable({
   totalPages,
   totalEvents,
   loading = false,
-  onPageChange,
   disabled = false,
+  query,
+  onQueryChange,
 }: EventsPopupTableProps) {
-  const [filters, setFilters] = useState<Partial<Record<SortKey, string>>>({})
-  const [sortKey, setSortKey] = useState<SortKey>("index")
-  const [sortDir, setSortDir] = useState<1 | -1>(1)
   const [pageInput, setPageInput] = useState(String(page))
+  const [filterDraft, setFilterDraft] = useState(query.filters)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     setPageInput(String(page))
   }, [page])
 
-  const filteredSorted = useMemo(() => {
-    const needle = (key: SortKey) => (filters[key] || "").trim().toLowerCase()
-    let rows = events.filter((e) => {
-      for (const col of COLUMNS) {
-        const q = needle(col.key)
-        if (!q) continue
-        const text = cellText(e, col.key).toLowerCase()
-        if (!text.includes(q)) return false
-      }
-      return true
-    })
-    rows = [...rows].sort((a, b) => compare(a, b, sortKey, sortDir))
-    return rows
-  }, [events, filters, sortKey, sortDir])
+  useEffect(() => {
+    setFilterDraft(query.filters)
+  }, [query.filters])
 
-  const toggleSort = (key: SortKey) => {
-    if (sortKey === key) setSortDir((d) => (d === 1 ? -1 : 1))
-    else {
-      setSortKey(key)
-      setSortDir(1)
+  const toggleSort = (key: EventTableSortColumn) => {
+    if (query.sortBy === key) {
+      onQueryChange({
+        ...query,
+        sortDir: query.sortDir === "asc" ? "desc" : "asc",
+        page: 1,
+      })
+    } else {
+      onQueryChange({
+        ...query,
+        sortBy: key,
+        sortDir: "asc",
+        page: 1,
+      })
     }
+  }
+
+  const scheduleFilterCommit = (nextFilters: Partial<Record<EventTableSortColumn, string>>) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      onQueryChange({ ...query, filters: nextFilters, page: 1 })
+    }, FILTER_DEBOUNCE_MS)
+  }
+
+  const onFilterChange = (key: EventTableSortColumn, value: string) => {
+    const next = { ...filterDraft, [key]: value }
+    setFilterDraft(next)
+    scheduleFilterCommit(next)
   }
 
   const goToPage = () => {
     const n = parseInt(pageInput, 10)
     if (Number.isNaN(n)) return
-    const clamped = Math.min(Math.max(1, n), Math.max(1, totalPages))
-    onPageChange(clamped)
+    const max = Math.max(1, totalPages)
+    const clamped = Math.min(Math.max(1, n), max)
+    onQueryChange({ ...query, page: clamped })
   }
 
-  const SortIcon = ({ col }: { col: SortKey }) => {
-    if (sortKey !== col) return <ArrowUpDown className="h-3 w-3 opacity-50" />
-    return sortDir === 1 ? (
+  const SortIcon = ({ col }: { col: EventTableSortColumn }) => {
+    if (query.sortBy !== col) return <ArrowUpDown className="h-3 w-3 opacity-50" />
+    return query.sortDir === "asc" ? (
       <ArrowUp className="h-3 w-3" />
     ) : (
       <ArrowDown className="h-3 w-3" />
@@ -161,10 +133,8 @@ export function EventsPopupTable({
                     type="search"
                     placeholder="Filter…"
                     className={inputClass}
-                    value={filters[col.key] ?? ""}
-                    onChange={(e) =>
-                      setFilters((prev) => ({ ...prev, [col.key]: e.target.value }))
-                    }
+                    value={filterDraft[col.key] ?? ""}
+                    onChange={(e) => onFilterChange(col.key, e.target.value)}
                     aria-label={`Filter ${col.label}`}
                   />
                 </th>
@@ -172,12 +142,12 @@ export function EventsPopupTable({
             </tr>
           </thead>
           <tbody>
-            {filteredSorted.map((e, rowIdx) => (
+            {events.map((e, rowIdx) => (
               <tr
                 key={
                   e.index !== undefined
                     ? `i-${e.index}`
-                    : `r-${rowIdx}-${cellText(e, "timestamp")}`
+                    : `r-${rowIdx}-${String(e.timestamp ?? "")}`
                 }
                 className="border-t border-border/50 align-top"
               >
@@ -204,15 +174,16 @@ export function EventsPopupTable({
 
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <p className="text-xs text-muted-foreground">
-          {totalEvents.toLocaleString()} total events · this page: {events.length} loaded · showing{" "}
-          {filteredSorted.length} after filter
+          <span className="font-medium text-foreground">{totalEvents.toLocaleString()}</span> matching
+          globally · <span className="font-medium text-foreground">{events.length}</span> rows on this
+          page
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
             disabled={page <= 1 || loading || disabled}
-            onClick={() => onPageChange(page - 1)}
+            onClick={() => onQueryChange({ ...query, page: page - 1 })}
           >
             Previous
           </Button>
@@ -231,7 +202,14 @@ export function EventsPopupTable({
               aria-label="Page number"
             />
             <span className="text-muted-foreground">/ {Math.max(1, totalPages)}</span>
-            <Button type="button" variant="secondary" size="sm" className="h-7 px-2" onClick={goToPage} disabled={loading || disabled}>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-7 px-2"
+              onClick={goToPage}
+              disabled={loading || disabled}
+            >
               Go
             </Button>
           </div>
@@ -239,7 +217,7 @@ export function EventsPopupTable({
             variant="outline"
             size="sm"
             disabled={page >= totalPages || totalPages < 1 || loading || disabled}
-            onClick={() => onPageChange(page + 1)}
+            onClick={() => onQueryChange({ ...query, page: page + 1 })}
           >
             Next
           </Button>
