@@ -15,7 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { TrainingConfig } from '@/components/training-config'
 import { TrainingProgress } from '@/components/training-progress'
-import { ClusterVisualization } from '@/components/cluster-visualization'
+import { VisualizationTab } from '@/components/visualization-tab'
 import { ClusterDetails } from '@/components/cluster-details'
 import { SecurityInsights } from '@/components/security-insights'
 import { EventLogUpload } from '@/components/event-log-upload'
@@ -47,6 +47,12 @@ export default function App() {
   const [insights, setInsights] = useState<InsightsResponse | null>(null)
   const [insightsLoading, setInsightsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  /** Keeps the visualization (Recharts) chunk off the main path until the tab is opened */
+  const [resultsTab, setResultsTab] = useState('insights')
+
+  useEffect(() => {
+    setResultsTab('insights')
+  }, [jobId])
 
   useEffect(() => {
     const checkBackend = async () => {
@@ -399,7 +405,7 @@ export default function App() {
               </Card>
             </div>
 
-            <Tabs defaultValue="insights" className="space-y-4">
+            <Tabs value={resultsTab} onValueChange={setResultsTab} className="space-y-4">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="insights">Security Insights</TabsTrigger>
                 <TabsTrigger value="visualization">Visualization</TabsTrigger>
@@ -416,7 +422,9 @@ export default function App() {
               </TabsContent>
 
               <TabsContent value="visualization">
-                <ClusterVisualization data={results} />
+                {resultsTab === 'visualization' && results && (
+                  <VisualizationTab data={results} />
+                )}
               </TabsContent>
 
               <TabsContent value="clusters">

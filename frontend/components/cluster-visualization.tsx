@@ -18,7 +18,7 @@ import {
   Bar,
 } from 'recharts'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import type { AnalysisResponse, ClusterResult } from '@/lib/api'
+import type { AnalysisResponse } from '@/lib/api'
 
 const CLUSTER_COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
@@ -26,14 +26,24 @@ const CLUSTER_COLORS = [
   '#14b8a6', '#a855f7', '#f43f5e', '#22c55e', '#0ea5e9',
 ]
 
+/** Cap scatter points so Recharts does not block the main thread on huge jobs */
+const MAX_SCATTER_POINTS = 4_000
+
 interface ClusterVisualizationProps {
   data: AnalysisResponse
 }
 
 export function ClusterVisualization({ data }: ClusterVisualizationProps) {
+  const scatterTotal = data.latent_visualization?.points?.length ?? 0
+
   const scatterData = useMemo(() => {
-    if (!data.latent_visualization?.points) return []
-    return data.latent_visualization.points
+    const raw = data.latent_visualization?.points
+    if (!raw?.length) return []
+    if (raw.length <= MAX_SCATTER_POINTS) return raw
+    const step = Math.ceil(raw.length / MAX_SCATTER_POINTS)
+    const out: typeof raw = []
+    for (let i = 0; i < raw.length; i += step) out.push(raw[i])
+    return out
   }, [data.latent_visualization])
 
   const threatDistData = useMemo(() => {
@@ -57,6 +67,11 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
     })).sort((a, b) => b.size - a.size)
   }, [data.clusters])
 
+  const clusterSizeBarData = useMemo(
+    () => clusterSizeData.slice(0, 10),
+    [clusterSizeData]
+  )
+
   const subsystemData = useMemo(() => {
     const counts: Record<string, number> = {}
     data.clusters.forEach(c => {
@@ -77,11 +92,17 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Latent Space Visualization</CardTitle>
           <CardDescription>
-            2D PCA projection of event embeddings (Variance explained: {
-              data.latent_visualization?.explained_variance
-                ? `${(data.latent_visualization.explained_variance[0] * 100).toFixed(1)}% + ${(data.latent_visualization.explained_variance[1] * 100).toFixed(1)}%`
-                : 'N/A'
-            })
+            2D PCA projection of event embeddings (Variance explained:{' '}
+            {data.latent_visualization?.explained_variance
+              ? `${(data.latent_visualization.explained_variance[0] * 100).toFixed(1)}% + ${(data.latent_visualization.explained_variance[1] * 100).toFixed(1)}%`
+              : 'N/A'}
+            ).
+            {scatterTotal > MAX_SCATTER_POINTS && (
+              <span className="block mt-1 text-amber-600/90 dark:text-amber-400/90">
+                Showing {scatterData.length.toLocaleString()} of {scatterTotal.toLocaleString()} points for
+                responsiveness.
+              </span>
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -189,7 +210,7 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
           <CardContent>
             <div className="h-[250px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={clusterSizeData.slice(0, 10)} layout="vertical">
+                <BarChart data={clusterSizeBarData} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                   <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} />
                   <YAxis
@@ -201,12 +222,12 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
                   <Tooltip
                     content={({ active, payload }) => {
                       if (active && payload && payload.length) {
-                        const data = payload[0].payload
+                        const row = payload[0].payload
                         return (
                           <div className="rounded-lg border bg-background p-2 shadow-sm">
-                            <p className="text-sm font-medium">{data.name}</p>
+                            <p className="text-sm font-medium">{row.name}</p>
                             <p className="text-xs text-muted-foreground">
-                              {data.size} events • {data.threat} threat
+                              {row.size} events • {row.threat} threat
                             </p>
                           </div>
                         )
@@ -215,7 +236,7 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
                     }}
                   />
                   <Bar dataKey="size" radius={[0, 4, 4, 0]}>
-                    {clusterSizeData.map((entry, index) => (
+                    {clusterSizeBarData.map((entry, index) => (
                       <Cell key={`cell-${index}`} fill={entry.fill} />
                     ))}
                   </Bar>
