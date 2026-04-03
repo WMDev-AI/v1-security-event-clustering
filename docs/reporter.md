@@ -47,6 +47,7 @@ Base URL (default): `http://localhost:8000/api`
 | GET | `/results/{job_id}` | Full analysis + metrics + 2D latent plot data |
 | POST | `/predict` | Cluster new events with saved model |
 | GET | `/cluster-events/{job_id}/{cluster_id}` | Paginated events in one cluster |
+| GET | `/threat-indicator-events/{job_id}` | Paginated events from clusters that list a given threat indicator (query `indicator`) |
 | POST | `/analyze` | Ad-hoc batch vs trained profiles |
 | GET | `/demo` | Sample event strings |
 | POST | `/upload` | Upload log file → event list |
@@ -118,6 +119,13 @@ Base URL (default): `http://localhost:8000/api`
 - **Query**: `page` (default 1), `limit` (default 30, max 100).
 - **Response**: `job_id`, `cluster_id`, `total_events`, `page`, `limit`, `total_pages`, `events` (array of lightweight event dicts with `index`, `timestamp`, IPs, `dest_port`, `subsystem`, `action`, `severity`, `content`).
 - **Errors**: `400` bad pagination; `404` unknown job or empty cluster.
+
+### 2.8a `GET /threat-indicator-events/{job_id}`
+
+- **Query**: `indicator` (required) — must **exactly match** a string that appears in some cluster profile’s `threat_indicators` (the same strings aggregated into `summary.top_threat_indicators`); `page` (default 1), `limit` (default 50, max 100).
+- **Response**: `job_id`, `indicator`, `cluster_ids` (clusters whose profile includes that indicator), `total_events`, `page`, `limit`, `total_pages`, `events` (same row shape as §2.8).
+- **Semantics**: Returns the union of all training events assigned to any matching cluster, sorted by global event index, paginated.
+- **Errors**: `400` if `indicator` is missing/blank or pagination invalid; `404` if model missing.
 
 ### 2.9 `POST /analyze`
 
@@ -603,7 +611,7 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 
 - **Constants**: `API_BASE = 'http://localhost:8000/api'`.
 - **Interfaces**: `TrainingRequest`, `TrainingProgress`, `SecurityEvent`, `ClusterResult`, `FileUploadResponse`, `AnalysisResponse`, plus extended types for insights, IOCs, MITRE (`InsightsResponse`, `IOCsResponse`, `MITREResponse`, etc.).
-- **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping`, `getMITREEvents` — each maps to the corresponding REST path documented in §2 (including §2.17 for MITRE-filtered events).
+- **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getThreatIndicatorEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping`, `getMITREEvents` — each maps to the corresponding REST path documented in §2 (including §2.8a and §2.17).
 
 ---
 
@@ -638,6 +646,7 @@ This section documents the **React** (Webpack-bundled SPA) frontend under `front
 | API client | `frontend/lib/api.ts` | `fetch` wrappers; base URL `http://localhost:8000/api`. |
 | Visualization shell | `frontend/components/visualization-tab.tsx` | `React.lazy` + `Suspense` around `ClusterVisualization`; Progress fallback (§12.9a). |
 | IOC downloads | `frontend/lib/ioc-export.ts` | JSON/CSV/firewall-text exports for IOCs tab (§12.9b). |
+| Threat Analysis tab | `frontend/components/threat-analysis.tsx` | Event popups for top indicators (§2.8a) and priority clusters (§2.8). |
 | Shared UI | `frontend/components/ui/*` | shadcn-style primitives (`Button`, `Card`, `Tabs`, `Badge`, `Progress`, `ScrollArea`, `Slider`, `Select`, `Tooltip`, etc.). |
 
 ### 12.2 Application state machine (`AppState`)
@@ -833,7 +842,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
   - **Security Insights** → `SecurityInsights` with `insights`, `insightsLoading`, and **`jobId={jobId ?? undefined}`** so MITRE/IOCs/API drill-downs work.
   - **Visualization** → `VisualizationTab` (lazy `ClusterVisualization`) only while the Visualization tab is selected.
   - **Cluster Details** → scrollable `ClusterDetails` with `jobId`.
-  - **Threat Analysis** → inline cards (top indicators, priority clusters filtered by threat level).
+  - **Threat Analysis** → `ThreatAnalysis` (`frontend/components/threat-analysis.tsx`): top threat indicators and priority clusters each expose **Events** / **View events** opening a dialog with the same paginated event table as MITRE/cluster popups; indicators call `GET /threat-indicator-events/{job_id}` (§2.8a), clusters call `GET /cluster-events/...` (§2.8). Rendered only when the Threat Analysis tab is active (`resultsTab === 'threats'`).
 
 ### 12.13 End-to-end user journey (sequence)
 

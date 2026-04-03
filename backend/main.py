@@ -577,6 +577,73 @@ async def get_cluster_events(job_id: str, cluster_id: int, page: int = 1, limit:
     }
 
 
+@app.get("/threat-indicator-events/{job_id}")
+async def get_threat_indicator_events(
+    job_id: str,
+    indicator: str,
+    page: int = 1,
+    limit: int = 50,
+):
+    """
+    Paginated events from all clusters whose profile includes this exact threat indicator string
+    (same strings as in summary top_threat_indicators).
+    """
+    if job_id not in trained_models:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    if not indicator or not indicator.strip():
+        raise HTTPException(status_code=400, detail="indicator query parameter is required")
+
+    if page < 1 or limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="Invalid page or limit parameters")
+
+    indicator_key = indicator.strip()
+    model_data = trained_models[job_id]
+    labels = model_data["labels"]
+    events = model_data["events"]
+    profiles = model_data["profiles"]
+
+    matching_cluster_ids = {
+        p.cluster_id for p in profiles if indicator_key in (p.threat_indicators or [])
+    }
+
+    matching_indices = sorted(
+        i for i, lab in enumerate(labels) if int(lab) in matching_cluster_ids
+    )
+    total_events = len(matching_indices)
+    total_pages = max(1, (total_events + limit - 1) // limit) if total_events else 1
+
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    paginated_indices = matching_indices[start_idx:end_idx]
+
+    rows = []
+    for idx in paginated_indices:
+        event = events[idx]
+        rows.append({
+            "index": idx,
+            "timestamp": event.timestamp,
+            "source_ip": event.source_ip,
+            "dest_ip": event.dest_ip,
+            "dest_port": event.dest_port,
+            "subsystem": event.subsystem,
+            "action": event.action,
+            "severity": event.severity,
+            "content": event.content,
+        })
+
+    return {
+        "job_id": job_id,
+        "indicator": indicator_key,
+        "cluster_ids": sorted(matching_cluster_ids),
+        "total_events": total_events,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "events": rows,
+    }
+
+
 @app.post("/analyze")
 async def analyze_events(request: AnalyzeRequest):
     """Analyze events using trained model and return security insights"""

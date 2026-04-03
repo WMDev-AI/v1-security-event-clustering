@@ -4,7 +4,6 @@ import {
   Brain,
   Network,
   AlertTriangle,
-  CheckCircle2,
   Server,
   RefreshCw,
 } from 'lucide-react'
@@ -17,6 +16,7 @@ import { TrainingConfig } from '@/components/training-config'
 import { TrainingProgress } from '@/components/training-progress'
 import { VisualizationTab } from '@/components/visualization-tab'
 import { ClusterDetails } from '@/components/cluster-details'
+import { ThreatAnalysis } from '@/components/threat-analysis'
 import { SecurityInsights } from '@/components/security-insights'
 import { EventLogUpload } from '@/components/event-log-upload'
 import {
@@ -434,64 +434,9 @@ export default function App() {
               </TabsContent>
 
               <TabsContent value="threats">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="text-base">Top Threat Indicators</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-2">
-                        {results.summary.top_threat_indicators.slice(0, 10).map(([indicator, count], i) => (
-                          <div key={i} className="flex items-center justify-between">
-                            <span className="text-sm truncate">{indicator}</span>
-                            <Badge variant="outline">{count}</Badge>
-                          </div>
-                        ))}
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <Card className="border-red-500/50">
-                    <CardHeader>
-                      <CardTitle className="text-base flex items-center gap-2">
-                        <AlertTriangle className="h-4 w-4 text-red-500" />
-                        Priority Clusters
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-3">
-                        {results.clusters
-                          .filter(c => c.threat_level === 'critical' || c.threat_level === 'high')
-                          .map(cluster => (
-                            <div key={cluster.cluster_id} className="bg-muted/50 rounded-lg p-3">
-                              <div className="flex items-center justify-between mb-2">
-                                <span className="font-medium">Cluster {cluster.cluster_id}</span>
-                                <Badge variant={cluster.threat_level as 'critical' | 'high'}>
-                                  {cluster.threat_level}
-                                </Badge>
-                              </div>
-                              <p className="text-xs text-muted-foreground">
-                                {cluster.size} events • {cluster.primary_subsystems.join(', ')}
-                              </p>
-                              {cluster.threat_indicators[0] && (
-                                <p className="text-xs text-red-400 mt-1">
-                                  {cluster.threat_indicators[0]}
-                                </p>
-                              )}
-                            </div>
-                          ))}
-                        {results.clusters.filter(c =>
-                          c.threat_level === 'critical' || c.threat_level === 'high'
-                        ).length === 0 && (
-                          <div className="text-center py-4 text-muted-foreground">
-                            <CheckCircle2 className="h-8 w-8 mx-auto mb-2 text-green-500" />
-                            <p className="text-sm">No critical or high-risk clusters detected</p>
-                          </div>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
+                {resultsTab === 'threats' && (
+                  <ThreatAnalysis data={results} jobId={jobId || undefined} />
+                )}
               </TabsContent>
             </Tabs>
           </div>

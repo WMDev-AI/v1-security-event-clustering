@@ -143,6 +143,37 @@ export async function getClusterEvents(
   return res.json();
 }
 
+export interface ThreatIndicatorEventsResponse {
+  job_id: string;
+  indicator: string;
+  cluster_ids: number[];
+  total_events: number;
+  page: number;
+  limit: number;
+  total_pages: number;
+  events: SecurityEvent[];
+}
+
+/** Events from all clusters whose profile lists this exact indicator (matches summary top_threat_indicators). */
+export async function getThreatIndicatorEvents(
+  jobId: string,
+  indicator: string,
+  page: number = 1,
+  limit: number = 50
+): Promise<ThreatIndicatorEventsResponse> {
+  const params = new URLSearchParams({
+    indicator,
+    page: String(page),
+    limit: String(limit),
+  });
+  const res = await fetch(`${API_BASE}/threat-indicator-events/${jobId}?${params}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail || 'Failed to get threat indicator events');
+  }
+  return res.json();
+}
+
 export async function getDemoEvents(): Promise<{ sample_events: string[] }> {
   const res = await fetch(`${API_BASE}/demo`);
   if (!res.ok) throw new Error('Failed to get demo events');
