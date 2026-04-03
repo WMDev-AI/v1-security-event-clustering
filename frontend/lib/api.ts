@@ -346,3 +346,51 @@ export async function getMITREMapping(jobId: string): Promise<MITREResponse> {
   }
   return res.json();
 }
+
+/** Row returned by GET /insights/{jobId}/mitre/events */
+export interface MITREEventsRow {
+  index: number;
+  timestamp: string;
+  source_ip: string;
+  dest_ip: string;
+  dest_port: number;
+  subsystem: string;
+  action: string;
+  severity: string;
+  content: string;
+}
+
+export interface MITREEventsResponse {
+  filter_type: string;
+  filter_value: string;
+  cluster_ids: number[];
+  total_events: number;
+  page: number;
+  limit: number;
+  total_pages: number;
+  events: MITREEventsRow[];
+}
+
+export type MitreEventFilter =
+  | { type: 'tactic'; value: string }
+  | { type: 'technique'; value: string }
+  | { type: 'kill_chain_stage'; value: string };
+
+export async function getMITREEvents(
+  jobId: string,
+  params: MitreEventFilter & { page?: number; limit?: number }
+): Promise<MITREEventsResponse> {
+  const search = new URLSearchParams();
+  if (params.type === 'tactic') search.set('tactic', params.value);
+  if (params.type === 'technique') search.set('technique', params.value);
+  if (params.type === 'kill_chain_stage') search.set('kill_chain_stage', params.value);
+  if (params.page != null) search.set('page', String(params.page));
+  if (params.limit != null) search.set('limit', String(params.limit));
+  const q = search.toString();
+  const res = await fetch(`${API_BASE}/insights/${jobId}/mitre/events?${q}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Failed to load MITRE-related events');
+  }
+  return res.json();
+}

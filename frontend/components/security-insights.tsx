@@ -7,7 +7,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { getMITREMapping, type MITREResponse, type SecurityEvent } from "@/lib/api";
+import {
+  getMITREMapping,
+  getMITREEvents,
+  type MITREResponse,
+  type SecurityEvent,
+  type MITREEventsResponse,
+  type MitreEventFilter,
+} from "@/lib/api";
 import {
   BarChart,
   Bar,
@@ -30,6 +37,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface SecurityInsight {
   insight_id: string;
@@ -127,12 +141,27 @@ function formatKillStage(stage: string): string {
     .join(" ");
 }
 
+interface MitrePopupState {
+  open: boolean;
+  title: string;
+  description: string;
+  filter?: MitreEventFilter;
+}
+
 export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps) {
   const [selectedInsight, setSelectedInsight] = useState<SecurityInsight | null>(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [mitreDetail, setMitreDetail] = useState<MITREResponse | null>(null);
   const [mitreLoading, setMitreLoading] = useState(false);
   const [mitreError, setMitreError] = useState<string | null>(null);
+  const [mitrePopup, setMitrePopup] = useState<MitrePopupState>({
+    open: false,
+    title: "",
+    description: "",
+  });
+  const [mitrePopupEvents, setMitrePopupEvents] = useState<MITREEventsResponse | null>(null);
+  const [mitrePopupLoading, setMitrePopupLoading] = useState(false);
+  const [mitrePopupError, setMitrePopupError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!jobId || !data) {
@@ -157,6 +186,26 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
       cancelled = true;
     };
   }, [jobId, data?.job_id]);
+
+  const loadMitrePopupEvents = async (filter: MitreEventFilter, page = 1) => {
+    if (!jobId) return;
+    setMitrePopupLoading(true);
+    setMitrePopupError(null);
+    try {
+      const res = await getMITREEvents(jobId, { ...filter, page, limit: 50 });
+      setMitrePopupEvents(res);
+    } catch (err) {
+      setMitrePopupError(err instanceof Error ? err.message : "Failed to load related events");
+      setMitrePopupEvents(null);
+    } finally {
+      setMitrePopupLoading(false);
+    }
+  };
+
+  const openMitrePopup = (title: string, description: string, filter: MitreEventFilter) => {
+    setMitrePopup({ open: true, title, description, filter });
+    void loadMitrePopupEvents(filter, 1);
+  };
 
   if (loading) {
     return (
@@ -659,9 +708,21 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                       <div className="flex flex-wrap gap-1.5">
                         {(mitreDetail.kill_chain_analysis?.stages_detected || []).length > 0 ? (
                           mitreDetail.kill_chain_analysis.stages_detected.map((s) => (
-                            <Badge key={s} variant="secondary" className="font-normal">
+                            <Button
+                              key={s}
+                              variant="secondary"
+                              size="sm"
+                              className="h-auto py-1"
+                              onClick={() =>
+                                openMitrePopup(
+                                  `Kill Chain Stage: ${formatKillStage(s)}`,
+                                  "Events from clusters mapped to tactics in this kill-chain stage.",
+                                  { type: "kill_chain_stage", value: s }
+                                )
+                              }
+                            >
                               {formatKillStage(s)}
-                            </Badge>
+                            </Button>
                           ))
                         ) : (
                           <span className="text-sm text-muted-foreground">No kill-chain stages inferred</span>
@@ -682,9 +743,21 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                     <div className="flex flex-wrap gap-1.5 mb-3">
                       {(mitreDetail.coverage_assessment?.high_impact_tactics_detected || []).length > 0 ? (
                         mitreDetail.coverage_assessment.high_impact_tactics_detected.map((t) => (
-                          <Badge key={t} variant="outline" className="border-orange-500/50 text-orange-100/90">
+                          <Button
+                            key={t}
+                            variant="outline"
+                            size="sm"
+                            className="h-auto py-1 border-orange-500/50 text-orange-100/90"
+                            onClick={() =>
+                              openMitrePopup(
+                                `High-Impact Tactic: ${t}`,
+                                "Events from clusters whose insights include this MITRE tactic.",
+                                { type: "tactic", value: t }
+                              )
+                            }
+                          >
                             {t}
-                          </Badge>
+                          </Button>
                         ))
                       ) : (
                         <span className="text-sm text-muted-foreground">None in the high-impact watchlist</span>
@@ -754,7 +827,20 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                               fontSize: "12px",
                             }}
                           />
-                          <Bar dataKey="events" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+                          <Bar
+                            dataKey="events"
+                            fill="#3b82f6"
+                            radius={[0, 4, 4, 0]}
+                            onClick={(entry: { full?: string } | undefined) => {
+                              const tactic = entry?.full;
+                              if (!tactic) return;
+                              openMitrePopup(
+                                `Tactic Exposure: ${tactic}`,
+                                "Events from clusters mapped to this tactic (bar-chart selection).",
+                                { type: "tactic", value: tactic }
+                              );
+                            }}
+                          />
                         </BarChart>
                       </ResponsiveContainer>
                     </CardContent>
@@ -775,9 +861,16 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                           Object.entries(mitreDetail.tactics_coverage)
                             .sort((a, b) => b[1].event_count - a[1].event_count)
                             .map(([tactic, info]) => (
-                              <div
+                              <button
                                 key={tactic}
-                                className="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2"
+                                className="w-full text-left rounded-lg border border-border/60 bg-muted/30 p-3 space-y-2 hover:border-primary/50 transition-colors"
+                                onClick={() =>
+                                  openMitrePopup(
+                                    `Tactic: ${tactic}`,
+                                    "Events from clusters whose insights include this tactic.",
+                                    { type: "tactic", value: tactic }
+                                  )
+                                }
                               >
                                 <div className="flex items-start justify-between gap-2">
                                   <span className="font-medium text-sm leading-snug">{tactic}</span>
@@ -801,7 +894,7 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                                     ))}
                                   </ul>
                                 )}
-                              </div>
+                              </button>
                             ))
                         ) : (
                           <p className="text-sm text-muted-foreground">No tactic buckets in this run</p>
@@ -823,9 +916,16 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                           Object.entries(mitreDetail.techniques_detected)
                             .sort((a, b) => b[1].event_count - a[1].event_count)
                             .map(([technique, info]) => (
-                              <div
+                              <button
                                 key={technique}
-                                className="rounded-md border border-border/50 bg-background/50 p-2.5 flex flex-col gap-1.5"
+                                className="w-full text-left rounded-md border border-border/50 bg-background/50 p-2.5 flex flex-col gap-1.5 hover:border-primary/50 transition-colors"
+                                onClick={() =>
+                                  openMitrePopup(
+                                    `Technique: ${technique}`,
+                                    "Events from clusters whose insights include this MITRE technique.",
+                                    { type: "technique", value: technique }
+                                  )
+                                }
                               >
                                 <div className="flex justify-between gap-2">
                                   <span className="text-sm font-mono leading-tight">{technique}</span>
@@ -840,7 +940,7 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                                     </Badge>
                                   ))}
                                 </div>
-                              </div>
+                              </button>
                             ))
                         ) : (
                           <p className="text-sm text-muted-foreground">No techniques extracted</p>
@@ -862,9 +962,16 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                   <CardContent>
                     <div className="grid gap-3 md:grid-cols-2">
                       {(mitreDetail.mitigation_priorities ?? []).map((row) => (
-                        <div
+                        <button
                           key={row.technique}
-                          className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2"
+                          className="w-full text-left rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2 hover:border-primary/50 transition-colors"
+                          onClick={() =>
+                            openMitrePopup(
+                              `Mitigation Priority: ${row.technique}`,
+                              "Events tied to this priority technique from MITRE mappings.",
+                              { type: "technique", value: row.technique }
+                            )
+                          }
                         >
                           <div className="flex justify-between gap-2">
                             <span className="text-sm font-mono font-medium leading-snug">{row.technique}</span>
@@ -877,7 +984,7 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                               <li key={i}>{m}</li>
                             ))}
                           </ul>
-                        </div>
+                        </button>
                       ))}
                     </div>
                   </CardContent>
@@ -1047,6 +1154,125 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={mitrePopup.open}
+        onOpenChange={(open) => {
+          setMitrePopup((prev) => ({ ...prev, open }));
+          if (!open) {
+            setMitrePopupEvents(null);
+            setMitrePopupError(null);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[96vw] md:max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>{mitrePopup.title || "MITRE Related Events"}</DialogTitle>
+            <DialogDescription>{mitrePopup.description}</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            {mitrePopupEvents && (
+              <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline">
+                  {mitrePopupEvents.total_events.toLocaleString()} events
+                </Badge>
+                <Badge variant="outline">
+                  Clusters:{" "}
+                  {mitrePopupEvents.cluster_ids.length > 0
+                    ? mitrePopupEvents.cluster_ids.map((c) => `C${c}`).join(", ")
+                    : "none"}
+                </Badge>
+                <Badge variant="outline">
+                  Page {mitrePopupEvents.page} / {mitrePopupEvents.total_pages}
+                </Badge>
+              </div>
+            )}
+
+            {mitrePopupLoading && (
+              <div className="flex items-center justify-center py-12 text-muted-foreground">
+                <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full animate-spin mr-2" />
+                Loading related events…
+              </div>
+            )}
+
+            {mitrePopupError && !mitrePopupLoading && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                {mitrePopupError}
+              </div>
+            )}
+
+            {!mitrePopupLoading && !mitrePopupError && mitrePopupEvents && (
+              <>
+                <ScrollArea className="h-[56vh] rounded-md border">
+                  <table className="w-full text-sm">
+                    <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur">
+                      <tr className="text-left">
+                        <th className="px-3 py-2 font-medium w-[70px]">#</th>
+                        <th className="px-3 py-2 font-medium w-[170px]">Time</th>
+                        <th className="px-3 py-2 font-medium w-[140px]">Source</th>
+                        <th className="px-3 py-2 font-medium w-[160px]">Destination</th>
+                        <th className="px-3 py-2 font-medium w-[90px]">Port</th>
+                        <th className="px-3 py-2 font-medium w-[120px]">Subsystem</th>
+                        <th className="px-3 py-2 font-medium w-[120px]">Action</th>
+                        <th className="px-3 py-2 font-medium w-[100px]">Severity</th>
+                        <th className="px-3 py-2 font-medium">Content</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mitrePopupEvents.events.map((e) => (
+                        <tr key={e.index} className="border-t border-border/50 align-top">
+                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.index}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.timestamp || "-"}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.source_ip || "-"}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.dest_ip || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.dest_port ?? "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.subsystem || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.action || "-"}</td>
+                          <td className="px-3 py-2 text-xs">{e.severity || "-"}</td>
+                          <td className="px-3 py-2 text-xs text-muted-foreground">{e.content || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </ScrollArea>
+
+                <div className="flex items-center justify-between">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={mitrePopupEvents.page <= 1 || mitrePopupLoading || !mitrePopup.filter}
+                    onClick={() => {
+                      if (!mitrePopup.filter) return;
+                      void loadMitrePopupEvents(mitrePopup.filter, mitrePopupEvents.page - 1);
+                    }}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    Showing {mitrePopupEvents.events.length} rows
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={
+                      mitrePopupEvents.page >= mitrePopupEvents.total_pages ||
+                      mitrePopupLoading ||
+                      !mitrePopup.filter
+                    }
+                    onClick={() => {
+                      if (!mitrePopup.filter) return;
+                      void loadMitrePopupEvents(mitrePopup.filter, mitrePopupEvents.page + 1);
+                    }}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

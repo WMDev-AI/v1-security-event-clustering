@@ -1390,6 +1390,135 @@ async def get_mitre_mapping(job_id: str):
     }
 
 
+def _mitre_kill_chain_stage_tactics() -> dict[str, list[str]]:
+    """Tactic names per kill-chain stage key (must match _analyze_kill_chain)."""
+    return {
+        "reconnaissance": ["Reconnaissance", "Discovery"],
+        "weaponization": [],
+        "delivery": ["Initial Access"],
+        "exploitation": ["Execution", "Privilege Escalation"],
+        "installation": ["Persistence", "Defense Evasion"],
+        "command_control": ["Command and Control"],
+        "actions_on_objectives": ["Collection", "Exfiltration", "Impact"],
+    }
+
+
+def _build_mitre_tactic_and_technique_cluster_maps(
+    events_by_cluster: dict[int, list],
+    insights_engine: SecurityInsightsEngine,
+) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    """Map each MITRE tactic / technique string to cluster IDs that emitted it in insights."""
+    tactic_to_clusters: dict[str, set[int]] = defaultdict(set)
+    technique_to_clusters: dict[str, set[int]] = defaultdict(set)
+    for cluster_id, cluster_events in events_by_cluster.items():
+        insights = insights_engine.analyze_cluster_insights(cluster_id, cluster_events)
+        for insight in insights:
+            for t in insight.mitre_tactics:
+                tactic_to_clusters[t].add(cluster_id)
+            for tech in insight.mitre_techniques:
+                technique_to_clusters[tech].add(cluster_id)
+    return tactic_to_clusters, technique_to_clusters
+
+
+def _serialize_event_table_row(index: int, event: SecurityEvent) -> dict:
+    return {
+        "index": index,
+        "timestamp": event.timestamp,
+        "source_ip": event.source_ip,
+        "dest_ip": event.dest_ip,
+        "dest_port": event.dest_port,
+        "subsystem": event.subsystem,
+        "action": event.action,
+        "severity": event.severity,
+        "content": (event.content or "")[:800],
+    }
+
+
+@app.get("/insights/{job_id}/mitre/events")
+async def get_mitre_related_events(
+    job_id: str,
+    tactic: Optional[str] = None,
+    technique: Optional[str] = None,
+    kill_chain_stage: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50,
+):
+    """
+    Return paginated security events whose clusters match a single MITRE filter:
+    one enterprise tactic name, one technique string, or one kill-chain stage key.
+    """
+    if job_id not in trained_models:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    provided = [x for x in [tactic, technique, kill_chain_stage] if x is not None and str(x).strip() != ""]
+    if len(provided) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide exactly one query parameter: tactic, technique, or kill_chain_stage",
+        )
+
+    if page < 1 or limit < 1 or limit > 200:
+        raise HTTPException(status_code=400, detail="Invalid page or limit (limit max 200)")
+
+    model_data = trained_models[job_id]
+    events: list = model_data["events"]
+    labels = model_data["labels"]
+
+    events_by_cluster: dict[int, list] = defaultdict(list)
+    for event, label in zip(events, labels):
+        events_by_cluster[int(label)].append(event)
+
+    tactic_map, technique_map = _build_mitre_tactic_and_technique_cluster_maps(
+        events_by_cluster, insights_engine
+    )
+
+    cluster_ids: set[int] = set()
+    filter_type = ""
+    filter_value = ""
+
+    if tactic is not None and str(tactic).strip() != "":
+        filter_type = "tactic"
+        filter_value = tactic.strip()
+        cluster_ids = set(tactic_map.get(filter_value, set()))
+    elif technique is not None and str(technique).strip() != "":
+        filter_type = "technique"
+        filter_value = technique.strip()
+        cluster_ids = set(technique_map.get(filter_value, set()))
+    else:
+        filter_type = "kill_chain_stage"
+        raw = (kill_chain_stage or "").strip().lower().replace(" ", "_")
+        stage_map = _mitre_kill_chain_stage_tactics()
+        if raw not in stage_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown kill_chain_stage. Valid keys: {', '.join(sorted(stage_map.keys()))}",
+            )
+        filter_value = raw
+        for tac in stage_map[raw]:
+            cluster_ids |= tactic_map.get(tac, set())
+
+    matching_indices = sorted(
+        {i for i, lab in enumerate(labels) if int(lab) in cluster_ids}
+    )
+    total_events = len(matching_indices)
+    total_pages = max(1, (total_events + limit - 1) // limit) if total_events else 1
+    start = (page - 1) * limit
+    page_indices = matching_indices[start : start + limit]
+
+    rows = [_serialize_event_table_row(idx, events[idx]) for idx in page_indices]
+
+    return {
+        "filter_type": filter_type,
+        "filter_value": filter_value,
+        "cluster_ids": sorted(cluster_ids),
+        "total_events": total_events,
+        "page": page,
+        "limit": limit,
+        "total_pages": total_pages,
+        "events": rows,
+    }
+
+
 def _analyze_kill_chain(tactics: list[str]) -> dict:
     """Analyze attack progression through kill chain"""
     kill_chain_stages = {
