@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -10,11 +10,18 @@ import { Progress } from "@/components/ui/progress";
 import {
   getMITREMapping,
   getMITREEvents,
+  getIOCs,
   type MITREResponse,
   type SecurityEvent,
   type MITREEventsResponse,
   type MitreEventFilter,
+  type IOCsResponse,
 } from "@/lib/api";
+import {
+  exportIOCsJson,
+  exportIOCsCsvFile,
+  exportFirewallRulesFile,
+} from "@/lib/ioc-export";
 import {
   BarChart,
   Bar,
@@ -162,6 +169,30 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
   const [mitrePopupEvents, setMitrePopupEvents] = useState<MITREEventsResponse | null>(null);
   const [mitrePopupLoading, setMitrePopupLoading] = useState(false);
   const [mitrePopupError, setMitrePopupError] = useState<string | null>(null);
+  const [iocsData, setIocsData] = useState<IOCsResponse | null>(null);
+  const [iocsLoading, setIocsLoading] = useState(false);
+  const [iocsError, setIocsError] = useState<string | null>(null);
+
+  const fetchIOCs = useCallback(async (id: string) => {
+    setIocsLoading(true);
+    setIocsError(null);
+    try {
+      const res = await getIOCs(id);
+      setIocsData(res);
+    } catch (err) {
+      setIocsError(err instanceof Error ? err.message : "Failed to load IOCs");
+      setIocsData(null);
+    } finally {
+      setIocsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "iocs") return;
+    const id = jobId ?? data?.job_id;
+    if (!id) return;
+    void fetchIOCs(id);
+  }, [activeTab, jobId, data?.job_id, fetchIOCs]);
 
   useEffect(() => {
     if (!jobId || !data) {
@@ -1120,31 +1151,104 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
+                {iocsLoading && (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                    Loading IOCs from analysis…
+                  </div>
+                )}
+                {iocsError && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm flex flex-wrap items-center gap-2">
+                    <span>{iocsError}</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void fetchIOCs(jobId ?? data.job_id)}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                )}
+
                 <div>
                   <h4 className="font-semibold mb-2">Threat IPs</h4>
                   <div className="flex flex-wrap gap-2">
-                    {executive_summary.top_threat_actors?.map((ip, idx) => (
-                      <Badge key={idx} variant="destructive" className="font-mono">
-                        {ip}
-                      </Badge>
-                    )) || <span className="text-muted-foreground">No threat IPs identified</span>}
+                    {iocsData && iocsData.malicious_ips.length > 0 ? (
+                      <TooltipProvider delayDuration={300}>
+                        {iocsData.malicious_ips.map((row) => (
+                          <Tooltip key={row.ip}>
+                            <TooltipTrigger asChild>
+                              <Badge
+                                variant="destructive"
+                                className={`font-mono cursor-default ${severityColors[row.severity] ?? ""}`}
+                              >
+                                {row.ip}
+                              </Badge>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-xs">
+                              <p className="font-semibold capitalize">{row.severity}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {row.event_count.toLocaleString()} events · {row.recommendation}
+                              </p>
+                              {row.contexts.length > 0 && (
+                                <p className="text-xs mt-1">{row.contexts.join(" · ")}</p>
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </TooltipProvider>
+                    ) : !iocsLoading && !iocsError ? (
+                      executive_summary.top_threat_actors?.map((ip, idx) => (
+                        <Badge key={idx} variant="destructive" className="font-mono">
+                          {ip}
+                        </Badge>
+                      ))
+                    ) : null}
+                    {!iocsLoading &&
+                      !iocsError &&
+                      (!iocsData || iocsData.malicious_ips.length === 0) &&
+                      (!executive_summary.top_threat_actors ||
+                        executive_summary.top_threat_actors.length === 0) && (
+                        <span className="text-muted-foreground">No threat IPs identified</span>
+                      )}
                   </div>
+                  {iocsData && iocsData.total_unique_threat_ips > 0 && (
+                    <p className="text-xs text-muted-foreground mt-2">
+                      {iocsData.total_unique_threat_ips.toLocaleString()} unique threat IPs in
+                      corpus (showing top {iocsData.malicious_ips.length})
+                    </p>
+                  )}
                 </div>
 
                 <div className="mt-4 p-4 bg-muted rounded-lg">
                   <h4 className="font-semibold mb-2">Export IOCs</h4>
                   <p className="text-sm text-muted-foreground mb-3">
-                    Use the API endpoint to export IOCs in various formats for integration with
-                    your security tools.
+                    Download the full IOC payload (JSON), a spreadsheet-friendly CSV, or suggested
+                    firewall rules as a text summary plus embedded JSON.
                   </p>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={iocsLoading || !iocsData || !!iocsError}
+                      onClick={() => iocsData && exportIOCsJson(iocsData)}
+                    >
                       Export as JSON
                     </Button>
-                    <Button variant="outline" size="sm">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={iocsLoading || !iocsData || !!iocsError}
+                      onClick={() => iocsData && exportIOCsCsvFile(iocsData)}
+                    >
                       Export as CSV
                     </Button>
-                    <Button variant="outline" size="sm">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={iocsLoading || !iocsData || !!iocsError}
+                      onClick={() => iocsData && exportFirewallRulesFile(iocsData)}
+                    >
                       Generate Firewall Rules
                     </Button>
                   </div>
