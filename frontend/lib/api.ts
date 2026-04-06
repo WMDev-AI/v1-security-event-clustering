@@ -8,6 +8,7 @@ export interface TrainingRequest {
     | 'vade'
     | 'contrastive'
     | 'ufcm'
+    | 'ufcm_lstm'
     | 'dmvc'
     | 'idec_lstm'
     | 'idec_transformer'

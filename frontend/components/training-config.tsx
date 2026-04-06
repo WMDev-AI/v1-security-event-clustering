@@ -70,6 +70,13 @@ const MODEL_INFO = {
     pros: ['Soft memberships', 'Smooth optimization vs alternating FCM'],
     best_for: 'Overlapping clusters and gradual threat behavior boundaries'
   },
+  ufcm_lstm: {
+    name: 'UFCM + LSTM (temporal windows)',
+    description:
+      'Same fuzzy latent objective and soft memberships as UFCM, but each sample is a time-ordered window of consecutive events; an LSTM encodes the window to z, and reconstruction regularizes the current (last) event vector only.',
+    pros: ['Temporal context', 'Fuzzy memberships like vector UFCM'],
+    best_for: 'Overlapping behaviors when timestamps are trustworthy and session context should shape z'
+  },
   dmvc: {
     name: 'Deep Multi-View Clustering (DMVC)',
     description:
@@ -113,7 +120,10 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
   const [gnnHidden, setGnnHidden] = useState(128)
   const [gnnLayers, setGnnLayers] = useState(2)
   const [showAdvanced, setShowAdvanced] = useState(false)
-  const usesSequenceModel = modelType === 'idec_lstm' || modelType === 'idec_transformer'
+  const usesSequenceModel =
+    modelType === 'idec_lstm' ||
+    modelType === 'idec_transformer' ||
+    modelType === 'ufcm_lstm'
   const usesGnnModel = modelType === 'idec_gnn'
   
   // Update events when preloaded events change

@@ -34,7 +34,11 @@ def _training_feature_matrix(
     model_type: ModelType,
     config: TrainingConfig,
 ) -> np.ndarray:
-    if model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
+    if model_type in (
+        ModelType.IDEC_LSTM,
+        ModelType.IDEC_TRANSFORMER,
+        ModelType.UFCM_LSTM,
+    ):
         from sequence_featurization import build_temporal_sequences
 
         return build_temporal_sequences(features, events, config.seq_len)
@@ -96,6 +100,7 @@ class ModelTypeEnum(str, Enum):
     VADE = "vade"
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
+    UFCM_LSTM = "ufcm_lstm"
     DMVC = "dmvc"
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
@@ -116,7 +121,7 @@ class TrainingRequest(BaseModel):
         default=16,
         ge=2,
         le=256,
-        description="Temporal window length for idec_lstm / idec_transformer (ignored for other models)",
+        description="Temporal window length for idec_lstm / idec_transformer / ufcm_lstm (ignored for other models)",
     )
     gnn_k_neighbors: int = Field(
         default=10,
@@ -353,7 +358,7 @@ async def run_training(
             "model_type": training_jobs[job_id].get("model_type"),
             "training_loss": finetune_loss,
             "uses_sequence_model": model_type
-            in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER),
+            in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER, ModelType.UFCM_LSTM),
             "seq_len": config.seq_len,
             "uses_gnn_model": model_type == ModelType.IDEC_GNN,
         }
@@ -419,6 +424,11 @@ async def list_models():
                 "id": "ufcm",
                 "name": "Deep Unconstrained Fuzzy C-Means (UFCM)",
                 "description": "UC-FCM objective in latent space: gradient descent on fuzzy clustering with optimal memberships given centers, plus optional reconstruction regularization"
+            },
+            {
+                "id": "ufcm_lstm",
+                "name": "UFCM with LSTM sequence encoder",
+                "description": "Same fuzzy latent objective as UFCM, but the encoder is an LSTM over time-ordered event windows (like IDEC+LSTM); reconstruction regularizes the current (last) event vector"
             },
             {
                 "id": "dmvc",

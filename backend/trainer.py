@@ -37,7 +37,7 @@ from deep_clustering import (
     vae_loss,
     cluster_assignment_entropy
 )
-from sequence_clustering import ImprovedDECSequence
+from sequence_clustering import ImprovedDECSequence, DeepUFCMSequence
 from gnn_clustering import ImprovedDECGNN
 
 
@@ -47,6 +47,7 @@ class ModelType(str, Enum):
     VADE = "vade"
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
+    UFCM_LSTM = "ufcm_lstm"
     DMVC = "dmvc"
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
@@ -187,7 +188,11 @@ class DeepClusteringTrainer:
         self.is_clusters_initialized = False
 
     def _uses_sequence_encoder(self) -> bool:
-        return self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER)
+        return self.model_type in (
+            ModelType.IDEC_LSTM,
+            ModelType.IDEC_TRANSFORMER,
+            ModelType.UFCM_LSTM,
+        )
     
     def _create_model(self) -> nn.Module:
         """Create model based on type"""
@@ -235,6 +240,19 @@ class DeepClusteringTrainer:
                 latent_dim=self.config.latent_dim,
                 dropout=self.config.dropout,
                 fuzziness_m=self.config.fuzziness_m,
+            )
+        elif self.model_type == ModelType.UFCM_LSTM:
+            return DeepUFCMSequence(
+                input_dim=self.input_dim,
+                seq_len=self.config.seq_len,
+                n_clusters=self.config.n_clusters,
+                seq_hidden=self.config.seq_hidden,
+                latent_dim=self.config.latent_dim,
+                dropout=self.config.dropout,
+                fuzziness_m=self.config.fuzziness_m,
+                lstm_layers=self.config.lstm_layers,
+                transformer_heads=self.config.transformer_heads,
+                transformer_layers=self.config.transformer_layers,
             )
         elif self.model_type == ModelType.DMVC:
             return DeepMultiViewClustering(
@@ -317,7 +335,7 @@ class DeepClusteringTrainer:
         # Get autoencoder
         if self.model_type == ModelType.VADE:
             autoencoder = self.model.vae
-        elif self.model_type == ModelType.UFCM:
+        elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
             autoencoder = self.model.autoencoder
         elif self.model_type == ModelType.CONTRASTIVE:
             # For contrastive, we pretrain the encoder differently
@@ -491,7 +509,7 @@ class DeepClusteringTrainer:
                     await progress_callback(100)
                 else:
                     progress_callback(100)
-        elif self.model_type == ModelType.UFCM:
+        elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
             initial_labels = self.model.initialize_clusters(loader, self.device)
             if progress_callback:
                 if inspect.iscoroutinefunction(progress_callback):
@@ -679,12 +697,13 @@ class DeepClusteringTrainer:
                     loss = self._vade_loss(x, x_recon, mu, logvar, gamma)
                     epoch_losses['clustering'] += loss.item()
                     
-                elif self.model_type == ModelType.UFCM:
+                elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
                     u, z, x_recon = self.model(x)
                     sq = self.model.squared_distances(z)
                     m = self.model.fuzziness_m
                     ufcm_loss = (u.pow(m) * sq).sum(dim=1).mean()
-                    recon_loss = reconstruction_loss(x, x_recon)
+                    x_target = x[:, -1, :] if self.model_type == ModelType.UFCM_LSTM else x
+                    recon_loss = reconstruction_loss(x_target, x_recon)
                     loss = (
                         ufcm_loss
                         + self.config.ufcm_recon_weight * recon_loss
@@ -1020,7 +1039,7 @@ class DeepClusteringTrainer:
                 elif self.model_type == ModelType.CONTRASTIVE:
                     _, _, cluster_prob = self.model(x)
                     pred = cluster_prob.argmax(dim=1)
-                elif self.model_type == ModelType.UFCM:
+                elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
                     u, _, _ = self.model(x)
                     pred = u.argmax(dim=1)
 
@@ -1057,7 +1076,7 @@ class DeepClusteringTrainer:
                 elif self.model_type == ModelType.CONTRASTIVE:
                     _, _, cluster_prob = self.model(x)
                     probs.append(cluster_prob.cpu().numpy())
-                elif self.model_type == ModelType.UFCM:
+                elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
                     u, _, _ = self.model(x)
                     probs.append(u.cpu().numpy())
 
@@ -1091,7 +1110,7 @@ class DeepClusteringTrainer:
             return self.model.clustering_layer.cluster_centers.detach().cpu().numpy()
         elif self.model_type == ModelType.VADE:
             return self.model.mu_c.detach().cpu().numpy()
-        elif self.model_type == ModelType.UFCM:
+        elif self.model_type in (ModelType.UFCM, ModelType.UFCM_LSTM):
             return self.model.cluster_centers.detach().cpu().numpy()
         return None
     
