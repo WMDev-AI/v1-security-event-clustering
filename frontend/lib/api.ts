@@ -10,7 +10,8 @@ export interface TrainingRequest {
     | 'ufcm'
     | 'dmvc'
     | 'idec_lstm'
-    | 'idec_transformer';
+    | 'idec_transformer'
+    | 'idec_gnn';
   n_clusters: number;
   latent_dim: number;
   hidden_dims: number[];
@@ -20,6 +21,10 @@ export interface TrainingRequest {
   learning_rate: number;
   /** Temporal window for LSTM/Transformer IDEC; backend default 16 if omitted */
   seq_len?: number;
+  /** Within-batch k-NN degree for idec_gnn */
+  gnn_k_neighbors?: number;
+  gnn_hidden_dim?: number;
+  gnn_num_layers?: number;
 }
 
 export interface TrainingProgress {

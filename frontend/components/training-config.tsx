@@ -90,6 +90,13 @@ const MODEL_INFO = {
       'Same temporal windowing as LSTM IDEC, but uses a Transformer encoder with positional encoding over the window, then mean-pools to a latent for Student-t clustering and reconstruction.',
     pros: ['Long-range attention within the window', 'Parallelizable encoder'],
     best_for: 'When you want attention over the last T events instead of recurrent pooling'
+  },
+  idec_gnn: {
+    name: 'IDEC + GNN (GCN on k-NN graph)',
+    description:
+      'Each training batch builds a symmetric k-NN graph on normalized event features; stacked graph convolution layers aggregate neighbor context into a latent vector, then the same IDEC objective (KL + reconstruction) applies.',
+    pros: ['Relational signal in feature space', 'No extra log metadata required'],
+    best_for: 'When events in a batch that look alike should reinforce each other’s representation'
   }
 }
 
@@ -102,8 +109,12 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
   const [pretrainEpochs, setPretrainEpochs] = useState(30)
   const [finetuneEpochs, setFinetuneEpochs] = useState(50)
   const [seqLen, setSeqLen] = useState(16)
+  const [gnnK, setGnnK] = useState(10)
+  const [gnnHidden, setGnnHidden] = useState(128)
+  const [gnnLayers, setGnnLayers] = useState(2)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const usesSequenceModel = modelType === 'idec_lstm' || modelType === 'idec_transformer'
+  const usesGnnModel = modelType === 'idec_gnn'
   
   // Update events when preloaded events change
   useEffect(() => {
@@ -128,6 +139,13 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
       batch_size: Math.min(256, Math.max(32, Math.floor(eventCount / 10))),
       learning_rate: 0.001,
       ...(usesSequenceModel ? { seq_len: seqLen } : {}),
+      ...(usesGnnModel
+        ? {
+            gnn_k_neighbors: gnnK,
+            gnn_hidden_dim: gnnHidden,
+            gnn_num_layers: gnnLayers,
+          }
+        : {}),
     }
     onSubmit(config)
   }
@@ -354,6 +372,62 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
                   step={10}
                 />
               </div>
+
+              {usesGnnModel && (
+                <>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-1.5">
+                        GNN k-NN neighbors (per batch)
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p className="max-w-[220px] text-xs">
+                              Each mini-batch forms a graph: each event links to this many nearest neighbors in feature space (within the batch). Larger k increases context but costs more compute.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{gnnK}</span>
+                    </div>
+                    <Slider
+                      value={[gnnK]}
+                      onValueChange={([v]) => setGnnK(v)}
+                      min={3}
+                      max={32}
+                      step={1}
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label>GCN hidden size</Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{gnnHidden}</span>
+                    </div>
+                    <Slider
+                      value={[gnnHidden]}
+                      onValueChange={([v]) => setGnnHidden(v)}
+                      min={64}
+                      max={256}
+                      step={32}
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label>GCN layers</Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{gnnLayers}</span>
+                    </div>
+                    <Slider
+                      value={[gnnLayers]}
+                      onValueChange={([v]) => setGnnLayers(v)}
+                      min={1}
+                      max={6}
+                      step={1}
+                    />
+                  </div>
+                </>
+              )}
 
               {usesSequenceModel && (
                 <div className="space-y-3">

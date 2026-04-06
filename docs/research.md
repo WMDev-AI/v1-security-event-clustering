@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), **IDEC with temporal sequence encoders (LSTM or Transformer)** over windows of consecutive events, Variational Deep Embedding (VaDE), contrastive deep clustering, deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM), and **Deep Multi-View Clustering (DMVC)** with a two-view split of the feature vector and DEC-style clustering on a fused latent code. The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
+This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), **IDEC with temporal sequence encoders (LSTM or Transformer)** over windows of consecutive events, **IDEC with a graph convolutional (GCN) encoder on batch-induced $k$-NN graphs**, Variational Deep Embedding (VaDE), contrastive deep clustering, deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM), and **Deep Multi-View Clustering (DMVC)** with a two-view split of the feature vector and DEC-style clustering on a fused latent code. The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
 
 ---
 
@@ -68,7 +68,7 @@ Many practical systems still use static features with shallow clustering, then a
 
 Relative to prior lines, this implementation combines:
 
-- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM, dual-encoder multi-view fusion via DMVC, and **sequence encoders** for IDEC over time-ordered event windows),
+- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM, dual-encoder multi-view fusion via DMVC, **sequence encoders** for IDEC over time-ordered event windows, and **GCN encoders** for IDEC over within-batch feature-similarity graphs),
 - intrinsic metric-aware selection and monitoring,
 - bounded ensemble refinement after fine-tuning,
 - direct integration with security insight generation.
@@ -156,7 +156,7 @@ Hence, this problem is worth pursuing because it addresses both scientific chall
 
 This implementation contributes the following engineering-research elements:
 
-- Multi-family deep clustering support in one pipeline (DEC/IDEC/**IDEC+LSTM**/**IDEC+Transformer**/VaDE/contrastive/UFCM/DMVC).
+- Multi-family deep clustering support in one pipeline (DEC/IDEC/**IDEC+LSTM**/**IDEC+Transformer**/**IDEC+GNN (GCN)**/VaDE/contrastive/UFCM/DMVC).
 - Stage-aware training orchestration and real-time progress reporting, including **per-epoch fine-tune loss decomposition** (`total_loss`, `clustering_loss`, `reconstruction_loss`) exposed through the training-status API and persisted on the results payload.
 - Intrinsic metric computation integrated into both training and result APIs.
 - Post-fine-tuning latent ensemble refinement:
@@ -223,9 +223,9 @@ This data-flow figure describes how raw security telemetry is transformed into a
 - `**D: Normalization**`: standardizes each feature dimension using dataset mean and variance so that distance computations in later steps are stable and comparable.
 - `**E: Deep Representation Learning**`: the encoder part of the selected deep clustering model maps normalized features into a latent embedding space where cluster geometry is more separable.
 - `**F: Cluster Initialization**`: produces initial cluster seeds/assignments (e.g., via GMM/K-means in latent space or model-specific initialization) to prevent degenerate clustering updates.
-- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/sequence-IDEC/VaDE/contrastive/UFCM/DMVC) to refine both latent geometry and soft assignment structure.
+- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/sequence-IDEC/**GNN-IDEC**/VaDE/contrastive/UFCM/DMVC) to refine both latent geometry and soft assignment structure.
 - `**H: Latent Embeddings Z**`: stores the learned embedding vectors $z_i=f_\theta(x_i)$ for all events, which are the basis for final clustering and metrics.
-- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows; for DMVC, argmax over Student-$t$ soft assignments $q$ on the fused latent; for **IDEC+LSTM/Transformer**, argmax over $q$ on the latent of the **sequence** encoder).
+- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows; for DMVC, argmax over Student-$t$ soft assignments $q$ on the fused latent; for **IDEC+LSTM/Transformer**, argmax over $q$ on the latent of the **sequence** encoder; for **IDEC+GNN**, argmax over $q$ on the latent of the **GCN** encoder).
 - `**J: Latent Ensemble Refinement**`: performs a bounded search over alternative latent partitions (algorithm choice, cluster-count candidates, and projection variants) to improve intrinsic quality.
 - `**K: Final Labels**`: selects the refined labels and treats them as the canonical clustering result for downstream profiling.
 - `**L: Intrinsic Metrics**`: computes Silhouette, Davies–Bouldin, and Calinski–Harabasz from the same latent representation used for clustering, enabling consistent quality reporting.
@@ -254,7 +254,7 @@ Runtime components (Figure 4.2 — text form for standard Markdown preview):
        │    ▼                ▼                ▼
        │ Event parser   DeepClusteringTrainer   Cluster analyzer
        │                    │  │                 Security insights engine
-       │                    │  ├─► Model family (DEC / IDEC / IDEC+LSTM / IDEC+Transformer / VaDE / Contrastive / UFCM / DMVC)
+       │                    │  ├─► Model family (DEC / IDEC / IDEC+LSTM / IDEC+Transformer / IDEC+GNN / VaDE / Contrastive / UFCM / DMVC)
        │                    │  └─► Latent refinement engine
        │                    │
        └────────────────────┴── results / metrics / insights
@@ -268,7 +268,7 @@ This runtime component view explains where each transformation is executed and h
 - `**API: FastAPI Service**`: exposes HTTP endpoints (train, status, results, cluster events, insights) and coordinates background training so the UI thread stays responsive.
 - `**PARSER: Event Parser**`: reused by the API to parse raw strings into structured events and then to produce normalized feature matrices for training.
 - `**TRAINER: DeepClusteringTrainer**`: encapsulates model training logic, including pretraining, initialization, fine-tuning, and inference of latent embeddings and soft assignments.
-- `**MODELS: DEC / IDEC / sequence-IDEC / VaDE / Contrastive / UFCM / DMVC**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM, dual-view fusion for DMVC, and **LSTM/Transformer over $[T,d]$ windows** for sequence IDEC).
+- `**MODELS: DEC / IDEC / sequence-IDEC / GNN-IDEC / VaDE / Contrastive / UFCM / DMVC**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM, dual-view fusion for DMVC, **LSTM/Transformer over $[T,d]$ windows** for sequence IDEC, and **GCN layers on batch $k$-NN graphs** for GNN-IDEC).
 - `**REFINE: Latent Refinement Engine**`: post-processes model output using intrinsic metrics by exploring candidate partitions under time and validity constraints.
 - `**ANALYZER: Cluster Analyzer**`: consumes refined labels and events to compute cluster-level profiles (representative events, top entities, severity distributions, etc.).
 - `**INSIGHTS: Security Insights Engine**`: maps cluster profiles into higher-level intelligence (risk assessment, attack pattern hints, and correlations).
@@ -310,6 +310,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 - **Mechanism (by family)**:
   - **DEC / IDEC / VaDE / UFCM (backbone path)**: optimize **reconstruction** (mean squared error between $x$ and decoder output) or, for VaDE, a **VAE-style ELBO** so the encoder learns a smooth latent space; UFCM uses the same autoencoder body but does not yet apply fuzzy cluster pressure.
   - **IDEC + LSTM / IDEC + Transformer**: optimize reconstruction of the **current** (last-in-window) event vector $\hat{x}_t$ from a latent $z_t$ produced by encoding the tensor $[x_{t-T+1},\ldots,x_t]$ (see §6.7); clustering pressure is applied only after this pretraining phase, as for standard IDEC.
+  - **IDEC + GNN (GCN)**: optimize reconstruction of each **row** $x_i$ from a latent $z_i$ produced by **graph convolutions** on a **within-batch** symmetric $k$-NN graph over feature vectors (see §6.9); pretraining uses the GCN+decoder body only, like IDEC’s autoencoder phase.
   - **DMVC**: train **two** autoencoders on the **first** and **second half** of each feature vector, minimizing the **sum** of per-view reconstruction errors so each view has a viable encoder–decoder before fusion and clustering.
   - **Contrastive**: optimize **invariance** across light augmentations (e.g., dropout-style views) so the encoder maps perturbed versions of the same event to similar representations—useful when raw logs are noisy or inconsistently tokenized.
 - **Outputs**: Updated weights for encoders/decoders (and related heads), recorded **pretrain loss** per epoch on the job status channel, and `history['pretrain_loss']` in the trainer.
@@ -319,7 +320,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 
 - **Aim**: Provide **initial cluster hypotheses** (centroids, mixture parameters, or cluster-layer weights) so fine-tuning starts from a partition that already separates coarse behavior modes. Deep clustering objectives are **non-convex** and **initialization-sensitive**; random or trivial seeds often yield poor local minima (merged clusters, empty clusters, or latents that ignore structure).
 - **Mechanism (by family)**:
-  - **DEC / IDEC / DMVC / UFCM / IDEC+LSTM / IDEC+Transformer**: encode the full dataset (or fused latent for DMVC; or **sequence batches** $X\in\mathbb{R}^{N\times T\times d}$ for sequence IDEC), run **K-means** (or equivalent) in latent space, and copy centroids into the model’s cluster parameters (`ClusteringLayer` centers or UFCM’s `cluster_centers`).
+  - **DEC / IDEC / DMVC / UFCM / IDEC+LSTM / IDEC+Transformer / IDEC+GNN**: encode the full dataset (or fused latent for DMVC; or **sequence batches** $X\in\mathbb{R}^{N\times T\times d}$ for sequence IDEC; or **matrix** $X\in\mathbb{R}^{N\times d}$ with batch-wise graphs at encode time for GNN-IDEC), run **K-means** (or equivalent) in latent space, and copy centroids into the model’s cluster parameters (`ClusteringLayer` centers or UFCM’s `cluster_centers`).
   - **VaDE**: **GMM-style** initialization in latent space (means, variances, mixture weights) aligned with the generative head.
   - **Contrastive**: latent **K-means** with optional multi-restart selection when configured, sometimes with progress reporting for long corpora.
 - **Outputs**: Initialized cluster centers (or mixture parameters), optional logging of initial label histograms, and flags so fine-tuning can assume clusters are **anchored** in $z$-space.
@@ -328,7 +329,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 #### `fine_tuning` — joint representation and clustering objective
 
 - **Aim**: **Jointly** refine embeddings and **soft** cluster structure so that events the analyst would group together sit coherently in latent space **and** under the model’s assignment mechanism. This is where family-specific objectives (KL targets for DEC/IDEC/DMVC, ELBO + mixture for VaDE, contrastive + consistency, fuzzy distortion + recon for UFCM) dominate the loss.
-- **Mechanism**: Stochastic optimization over mini-batches with family-specific forward passes and losses. For DEC/IDEC/DMVC and **sequence IDEC**, a **target distribution** over soft assignments is recomputed on a fixed interval and used in a **KL** term; IDEC (vector and sequence) and DMVC add **reconstruction** (for sequence IDEC, MSE compares the decoder output to **$x_t$** only—the last row of each window); DMVC adds **cross-view latent alignment**. The trainer evaluates **intrinsic metrics** (Silhouette, DBI, CH) on a coarser schedule and can stop early if **assignment drift** between checkpoints falls below a tolerance. **Observability**: every epoch the service exposes **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` on the training job payload; intrinsic metrics are merged every fifth epoch and the last snapshot is carried between those evaluations so polling UIs stay informative. After training, the **final epoch** values of the three loss scalars are stored on the completed job and returned under **`training_loss`** on **`/results`** alongside recomputed intrinsic metrics on refined labels.
+- **Mechanism**: Stochastic optimization over mini-batches with family-specific forward passes and losses. For DEC/IDEC/DMVC, **sequence IDEC**, and **GNN-IDEC**, a **target distribution** over soft assignments is recomputed on a fixed interval and used in a **KL** term; IDEC (vector, sequence, and GNN) and DMVC add **reconstruction** (for sequence IDEC, MSE compares the decoder output to **$x_t$** only—the last row of each window; for GNN-IDEC, MSE compares to the **same-row** feature vector $x_i$); DMVC adds **cross-view latent alignment**. The trainer evaluates **intrinsic metrics** (Silhouette, DBI, CH) on a coarser schedule and can stop early if **assignment drift** between checkpoints falls below a tolerance. **Observability**: every epoch the service exposes **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` on the training job payload; intrinsic metrics are merged every fifth epoch and the last snapshot is carried between those evaluations so polling UIs stay informative. After training, the **final epoch** values of the three loss scalars are stored on the completed job and returned under **`training_loss`** on **`/results`** alongside recomputed intrinsic metrics on refined labels.
 - **Outputs**: Converged (or early-stopped) model weights, `history` time series of losses and periodic metrics, and **base** hard labels from `argmax` of the model’s soft outputs (before optional postprocessing refinement).
 - **Typical failures**: Loss plateaus with poor metrics (objective–metric mismatch), cluster collapse, or instability from aggressive learning rates; may require more pretraining, different $K$, or another model family.
 
@@ -728,7 +729,7 @@ The HTTP **job status** and **`/results`** payload surface these three names for
 
 ## 6.7 Improved DEC on temporal windows — LSTM and Transformer sequence encoders (IDEC only)
 
-This section documents **sequence-based IDEC**, implemented in **`backend/sequence_clustering.py`** and **`backend/sequence_featurization.py`**, and selected in training as **`idec_lstm`** or **`idec_transformer`** (`ModelType.IDEC_LSTM`, `IDEC_TRANSFORMER` in **`backend/trainer.py`**). **DEC, VaDE, contrastive, UFCM, and DMVC remain on the flat $d$-dimensional vector path**; only **IDEC** has LSTM/Transformer variants in the current codebase.
+This section documents **sequence-based IDEC**, implemented in **`backend/sequence_clustering.py`** and **`backend/sequence_featurization.py`**, and selected in training as **`idec_lstm`** or **`idec_transformer`** (`ModelType.IDEC_LSTM`, `IDEC_TRANSFORMER` in **`backend/trainer.py`**). **DEC, VaDE, contrastive, UFCM, and DMVC remain on the flat $d$-dimensional vector path**; among IDEC variants, **LSTM/Transformer** encode **temporal windows** (this section), while **GCN** encodes **batch graphs** (§6.9).
 
 **Motivation.** Security telemetry is naturally **ordered in time**. A single event’s feature vector may be ambiguous; a short **window** of consecutive events can carry richer context (bursts, sequences of actions, evolving sessions). Sequence IDEC encodes each window into a latent $z_t\in\mathbb{R}^{m_{\mathrm{latent}}}$, then applies the same **Student-$t$ clustering distribution** and **KL-to-target** fine-tuning pattern as vector IDEC (§6.2).
 
@@ -759,12 +760,14 @@ padding the **earliest** positions with repeats of $x_0$ when $t<T-1$ so every r
 ### Relation to other families
 
 - **Vector IDEC (§6.2)**: same clustering and target-distribution mechanics; sequence IDEC replaces the MLP encoder with **LSTM/Transformer over $[T,d]$** and reconstructs **$x_t$** only.
+- **IDEC + GNN (§6.9)**: same IDEC objective; encoder is **GCN on within-batch $k$-NN** instead of an MLP on a single row.
 - **DMVC / UFCM**: no sequence path; they address **multi-view** and **fuzzy** geometry on **per-event** vectors, respectively.
 
 ## 6.8 Model Selection Guidance (Beginner-Friendly)
 
 - **IDEC (recommended default)**: best first choice when you want balanced quality, stability, and interpretability.
 - **IDEC + LSTM / IDEC + Transformer**: use when events are **time-ordered** and **short temporal context** may disambiguate behaviors; same interpretability story as IDEC after labels exist (§6.7).
+- **IDEC + GNN (GCN)**: use when **local neighborhoods in feature space** within a training batch should **mutually inform** embeddings (e.g. many near-duplicates or tight benign clouds); interpretability after labeling matches IDEC; graph is **not** a global log graph—see §6.9.
 - **DEC**: use when you need a simpler/faster cluster-focused baseline.
 - **VaDE**: use when probabilistic membership and uncertainty are important to your analysis.
 - **Contrastive**: use when data noise is high and invariance learning is a priority.
@@ -775,11 +778,39 @@ A practical workflow is:
 
 1. start with IDEC,
 2. if timestamps are trustworthy and sessions matter, try **IDEC+LSTM** or **IDEC+Transformer** (vary `seq_len`),
-3. compare against DEC as a simpler baseline,
-4. try VaDE if ambiguity/uncertainty modeling is needed,
-5. try contrastive models when input noise or variability is severe,
-6. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question,
-7. try DMVC when a **two-view feature layout** is plausible and you want explicit cross-view latent agreement.
+3. if relational smoothing in feature space is attractive and batch sizes are adequate, try **IDEC+GNN** (vary `gnn_k_neighbors`, depth, width; §6.9),
+4. compare against DEC as a simpler baseline,
+5. try VaDE if ambiguity/uncertainty modeling is needed,
+6. try contrastive models when input noise or variability is severe,
+7. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question,
+8. try DMVC when a **two-view feature layout** is plausible and you want explicit cross-view latent agreement.
+
+## 6.9 Improved DEC with GCN encoder on batch-induced $k$-NN graphs (IDEC only)
+
+This section documents **GNN-IDEC**, implemented in **`backend/gnn_clustering.py`** and selected as **`idec_gnn`** (`ModelType.IDEC_GNN` in **`backend/trainer.py`**). It keeps the **same Student-$t$ clustering head, target distribution, KL fine-tuning, and MLP decoder** as vector IDEC (§6.2), but replaces the **MLP encoder** with a small **graph convolutional stack** on a graph defined **inside each mini-batch**.
+
+**Motivation.** Events that are **close in handcrafted feature space** often belong to the same campaign, tool noise, or service behavior. A **$k$-nearest-neighbor** graph on batch rows makes nearby events exchange information before clustering, analogous to relational encoders in graph ML—without requiring a hand-built IP/session graph.
+
+**Graph construction (within batch).** For a batch matrix $X\in\mathbb{R}^{B\times d}$ (normalized features), pairwise distances (Euclidean) yield a **symmetric $k$-NN** adjacency (excluding self, then symmetrizing), **self-loops** added, then **symmetric normalization** $\tilde{A} = D^{-1/2}(A+I)D^{-1/2}$ in the implementation. Effective $k$ is $\min(k_{\mathrm{cfg}}, B-1)$.
+
+**Encoder.** $L$ layers of the form $H^{(\ell+1)} = \mathrm{dropout}(\mathrm{ReLU}(\tilde{A}\, H^{(\ell)} W^{(\ell)}))$ with $H^{(0)}=X$, terminating in latent dimension $m_{\mathrm{latent}}$. This is a **dense-batch GCN** (no PyTorch Geometric dependency).
+
+**Decoder and losses.** An MLP maps $z_i$ to $\hat{x}_i\in\mathbb{R}^d$. **Pretraining** minimizes reconstruction MSE on $x$; **fine-tuning** adds the **IDEC** KL to the sharpened target plus $\gamma$ times reconstruction, with periodic recomputation of $p$ from $q$, as for other DEC-family models.
+
+**Training vs inference.** Both use **only the feature matrix** $[N,d]$—no separate graph upload. At **inference** (`/predict`), the graph is built **on the submitted batch**; small batches yield smaller effective neighborhoods.
+
+**Hyperparameters (`TrainingConfig` / API).** `gnn_k_neighbors`, `gnn_hidden_dim`, `gnn_num_layers`; plus shared IDEC fields (`gamma`, `alpha`, `latent_dim`, $K$, epochs).
+
+**Limitations.**
+
+- The graph is **not global** over $N$: edges exist only between events that co-occur in the **same SGD batch**, so structure differs from a full-corpus $k$-NN graph.
+- Very **small batches** cap $k$ and reduce neighbor signal; very **large $k$** increases compute ($O(B^2 d)$ for distances per batch).
+- **DEC / VaDE / contrastive / UFCM / DMVC** do not use this path; only **IDEC** exposes **`idec_gnn`**.
+
+### Relation to other families
+
+- **Vector IDEC**: identical clustering and decoder narrative; encoder swaps MLP for **GCN on batch $k$-NN**.
+- **Sequence IDEC (§6.7)**: complementary—sequence models use **time-ordered windows**; GNN-IDEC uses **feature-space neighbors within a batch**.
 
 ---
 
@@ -790,11 +821,11 @@ This training strategy is designed to balance three goals that often conflict in
 ### 7.1 Stage-Wise Optimization
 
 1. **Pretraining**: learn a stable latent manifold before hard clustering pressure is applied.
-  In this stage, the model focuses on structure-preserving objectives (reconstruction for DEC/IDEC/VaDE/UFCM, or contrastive consistency for the contrastive family). This reduces sensitivity to noisy features and prevents early collapse into poor local minima.
+  In this stage, the model focuses on structure-preserving objectives (reconstruction for DEC/IDEC/VaDE/UFCM/**GNN-IDEC** (GCN+decoder), or contrastive consistency for the contrastive family). This reduces sensitivity to noisy features and prevents early collapse into poor local minima.
 2. **Initialization**: estimate cluster seeds in latent space.
   Cluster-aware methods are strongly initialization-dependent; this stage computes initial assignments/centers (e.g., K-means/GMM/model-specific initialization) so fine-tuning starts from a plausible partition.
 3. **Fine-tuning**: optimize clustering-aware objective.
-  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/**sequence-IDEC**/VaDE/contrastive/UFCM/DMVC), while periodic metrics monitor whether separation improves or degrades. The trainer logs **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **each epoch** for API/UI consumption (see §7.3 implementation note).
+  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/**sequence-IDEC**/**GNN-IDEC**/VaDE/contrastive/UFCM/DMVC), while periodic metrics monitor whether separation improves or degrades. The trainer logs **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **each epoch** for API/UI consumption (see §7.3 implementation note).
 4. **Postprocessing**: bounded latent ensemble refinement with constraints.
   After model optimization, discrete labels are refined via constrained search in latent space (algorithm and $K$ variants) to recover better intrinsic partitions without retraining encoder weights.
 
@@ -806,7 +837,7 @@ This decomposition improves controllability: each stage answers a different ques
 Sequence workflow (Figure 7.2 — text form for standard Markdown preview):
 
   1. User/API ──► Parser: upload and parse events
-  2. Parser ──► Trainer: normalized matrix X (or [N,T,d] windows for sequence IDEC)
+  2. Parser ──► Trainer: normalized matrix X (or [N,T,d] windows for sequence IDEC; still [N,d] for GNN-IDEC with graphs built per batch)
   3. Trainer: pretrain encoder → initialize centers/distribution → fine-tune objective
   4. Trainer ──► Refinement: latent Z and initial labels y0
   5. Refinement: bounded ensemble search ──► refined labels y*
@@ -819,7 +850,7 @@ Sequence workflow (Figure 7.2 — text form for standard Markdown preview):
 The sequence workflow can be interpreted as a contract between data handling, model optimization, and analyst-facing outputs:
 
 - `**U -> P: Upload and parse events**`: the user submits raw events; parser validation occurs before expensive training is allowed.
-- `**P -> T: Normalized matrix X**`: trainer receives fixed-dimensional, **normalized** inputs—either per-event vectors $X\in\mathbb{R}^{N\times d}$ or, for **IDEC+LSTM/Transformer**, time-ordered windows $X\in\mathbb{R}^{N\times T\times d}$ built after the same per-event normalization (§6.7).
+- `**P -> T: Normalized matrix X**`: trainer receives fixed-dimensional, **normalized** inputs—either per-event vectors $X\in\mathbb{R}^{N\times d}$ or, for **IDEC+LSTM/Transformer**, time-ordered windows $X\in\mathbb{R}^{N\times T\times d}$ built after the same per-event normalization (§6.7). **IDEC+GNN** also consumes $X\in\mathbb{R}^{N\times d}$; batching defines the graph (§6.9).
 - `**T -> T: Pretrain encoder**`: latent manifold is shaped with structure-preserving objectives.
 - `**T -> T: Initialize centers/distribution**`: initial cluster hypotheses are estimated in latent space.
 - `**T -> T: Fine-tune deep objective**`: clustering-aware optimization refines both representation and assignment structure.
@@ -1232,7 +1263,7 @@ $H_{ac} = S_a \cap T_b$.
 
 If non-empty, strength is reported as $|H_{ac}| / |S_a|$ (fraction of $a$’s sources that are “pivots” into $b$’s target set). The description states that sources in cluster $a$ are targets in cluster $b$, suggesting a possible **lateral movement or multi-stage** narrative. This is a **weak structural signal**: it does not prove temporal ordering or causality; analysts should validate with timestamps and authentication context.
 
-**Latent centroid similarity (`sequence_latent_similarity`).** When `latent_embeddings` (per-event matrix $Z$) and `cluster_labels` align in length, the engine computes **L2-normalized** mean latent vectors (centroids) per cluster and, for each unordered pair $(a,b)$, the **cosine similarity** of those centroids. If similarity $\ge$ a configurable threshold (default $0.55$), it emits `correlation_type="sequence_latent_similarity"` with `correlation_strength` equal to that cosine. Despite the name, this uses **whatever** latent vectors the job stored (vector IDEC, sequence IDEC, DMVC, etc.); it highlights **geometrically similar** cluster prototypes in embedding space, not IP overlap.
+**Latent centroid similarity (`sequence_latent_similarity`).** When `latent_embeddings` (per-event matrix $Z$) and `cluster_labels` align in length, the engine computes **L2-normalized** mean latent vectors (centroids) per cluster and, for each unordered pair $(a,b)$, the **cosine similarity** of those centroids. If similarity $\ge$ a configurable threshold (default $0.55$), it emits `correlation_type="sequence_latent_similarity"` with `correlation_strength` equal to that cosine. Despite the name, this uses **whatever** latent vectors the job stored (vector IDEC, sequence IDEC, GNN-IDEC, DMVC, etc.); it highlights **geometrically similar** cluster prototypes in embedding space, not IP overlap.
 
 **Evaluation guidance.** Treat correlations as **hypotheses for investigation**: sort by `correlation_strength`, cross-check shared IPs against asset inventory, and reject spurious overlaps (NAT pools, load balancers, scanners hitting many clusters). For latent pairs, confirm with cluster profiles and samples before merging narratives—high centroid similarity can still reflect benign structure shared across clusters.
 
@@ -1274,7 +1305,7 @@ For stronger reproducibility, also record:
 
 ### 12.2 Core Experiments
 
-1. **Model family comparison**: DEC vs IDEC vs **IDEC+LSTM** vs **IDEC+Transformer** vs VaDE vs contrastive vs UFCM vs DMVC.
+1. **Model family comparison**: DEC vs IDEC vs **IDEC+LSTM** vs **IDEC+Transformer** vs **IDEC+GNN** vs VaDE vs contrastive vs UFCM vs DMVC.
 2. **Latent dimension sweep**: impact of $m$ on separability.
 3. **Cluster count sensitivity**: fixed $K$ vs adaptive search.
 4. **Refinement ablation**:
@@ -1314,7 +1345,7 @@ This section gives **illustrative** experimental summaries that match the evalua
 ### 13.1 Setup (aligned with the codebase)
 
 - **Input**: $N \approx 10^4$–$10^5$ parsed key=value events; per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
-- **Models**: DEC, IDEC, **IDEC+LSTM**, **IDEC+Transformer**, VaDE, contrastive, UFCM, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. For sequence IDEC, record **`seq_len`** (and LSTM/Transformer width-depth knobs) alongside the above. (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
+- **Models**: DEC, IDEC, **IDEC+LSTM**, **IDEC+Transformer**, **IDEC+GNN**, VaDE, contrastive, UFCM, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. For sequence IDEC, record **`seq_len`** (and LSTM/Transformer width-depth knobs). For GNN-IDEC, record **`gnn_k_neighbors`**, **`gnn_hidden_dim`**, **`gnn_num_layers`**, and **batch size** (it shapes the graph). (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
 - **Refinement**: latent ensemble search with time budget $T_{\max}\approx 8\,\mathrm{s}$, sampled Silhouette for scoring (Section 9).
 - **Metrics**: Silhouette ($S$, higher better), Davies–Bouldin ($\mathrm{DBI}$, lower better), Calinski–Harabasz ($\mathrm{CH}$, higher better), all computed in **latent space** on final assignments unless stated otherwise.
 
@@ -1343,9 +1374,10 @@ Values are rounded to two decimals; CH scaled for readability. DBI and CH are on
 | DMVC | 0.10 | 2.2 | 6.4 |
 | IDEC + LSTM | 0.11 | 2.2 | 6.6 |
 | IDEC + Transformer | 0.11 | 2.1 | 6.7 |
+| IDEC + GNN (GCN) | 0.11 | 2.2 | 6.6 |
 | Contrastive | 0.09 | 2.4 | 5.9 |
 
-IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. **Sequence IDEC** rows are **illustrative**: outcomes depend on timestamp quality, burst structure, and `seq_len`; they are not guaranteed to beat vector IDEC on every corpus. DMVC’s relative position depends strongly on whether the **feature half-split** matches meaningful structure; the table entry is **illustrative** only. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
+IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. **Sequence IDEC** rows are **illustrative**: outcomes depend on timestamp quality, burst structure, and `seq_len`; they are not guaranteed to beat vector IDEC on every corpus. **GNN-IDEC** is similarly **illustrative**: gains depend on batch size, $k$, and whether within-batch neighbors are semantically meaningful. DMVC’s relative position depends strongly on whether the **feature half-split** matches meaningful structure; the table entry is **illustrative** only. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
 
 ### 13.4 Table 3 — Ablations: encoder and refinement
 
@@ -1462,7 +1494,7 @@ and accept updates only when improvements are also reflected in analyst-facing u
 Potential research and engineering extensions:
 
 - self-supervised pretraining with richer augmentations,
-- graph-based event correlation embeddings,
+- **global** or **session/IP** graphs for GNN encoders (beyond within-batch $k$-NN on features),
 - extending **sequence encoders** beyond IDEC (e.g. UFCM/DMVC on $[T,d]$ tensors) and richer positional or gap-aware models,
 - online/incremental clustering for streaming SOC workflows,
 - stability-based automatic $K$ selection,
@@ -1482,7 +1514,7 @@ Further high-impact directions include:
 This system implements a production-aware deep clustering framework for security event intelligence, integrating:
 
 - representation learning,
-- cluster-aware optimization across DEC, IDEC, **sequence IDEC (LSTM/Transformer)**, VaDE, contrastive, UFCM, and DMVC families,
+- cluster-aware optimization across DEC, IDEC, **sequence IDEC (LSTM/Transformer)**, **GNN-IDEC (GCN on batch $k$-NN)**, VaDE, contrastive, UFCM, and DMVC families,
 - intrinsic metric evaluation,
 - bounded latent ensemble refinement,
 - and threat-centric interpretation.

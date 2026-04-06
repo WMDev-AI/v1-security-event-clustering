@@ -99,6 +99,7 @@ class ModelTypeEnum(str, Enum):
     DMVC = "dmvc"
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
+    IDEC_GNN = "idec_gnn"
 
 
 class TrainingRequest(BaseModel):
@@ -116,6 +117,24 @@ class TrainingRequest(BaseModel):
         ge=2,
         le=256,
         description="Temporal window length for idec_lstm / idec_transformer (ignored for other models)",
+    )
+    gnn_k_neighbors: int = Field(
+        default=10,
+        ge=1,
+        le=256,
+        description="Within-batch k for idec_gnn k-NN graph (ignored for other models)",
+    )
+    gnn_hidden_dim: int = Field(
+        default=128,
+        ge=16,
+        le=512,
+        description="GCN hidden width for idec_gnn",
+    )
+    gnn_num_layers: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description="Number of GCN layers for idec_gnn",
     )
 
 
@@ -336,6 +355,7 @@ async def run_training(
             "uses_sequence_model": model_type
             in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER),
             "seq_len": config.seq_len,
+            "uses_gnn_model": model_type == ModelType.IDEC_GNN,
         }
         
         training_jobs[job_id]["status"] = "completed"
@@ -415,6 +435,11 @@ async def list_models():
                 "name": "IDEC with Transformer sequence encoder",
                 "description": "Improved DEC with a Transformer encoder over temporal event windows; same IDEC objective with sequence context"
             },
+            {
+                "id": "idec_gnn",
+                "name": "IDEC with Graph Neural Network (GCN) encoder",
+                "description": "Improved DEC where each mini-batch induces a symmetric k-NN graph on event features; stacked GCN layers aggregate neighbor context before Student-t clustering and MLP reconstruction"
+            },
         ]
     }
 
@@ -447,6 +472,9 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
         pretrain_lr=request.learning_rate,
         finetune_lr=request.learning_rate / 10,
         seq_len=request.seq_len,
+        gnn_k_neighbors=request.gnn_k_neighbors,
+        gnn_hidden_dim=request.gnn_hidden_dim,
+        gnn_num_layers=request.gnn_num_layers,
     )
     
     # Create job - store raw events, parsing happens in background

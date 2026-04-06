@@ -38,6 +38,7 @@ from deep_clustering import (
     cluster_assignment_entropy
 )
 from sequence_clustering import ImprovedDECSequence
+from gnn_clustering import ImprovedDECGNN
 
 
 class ModelType(str, Enum):
@@ -49,6 +50,7 @@ class ModelType(str, Enum):
     DMVC = "dmvc"
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
+    IDEC_GNN = "idec_gnn"
 
 
 @dataclass
@@ -93,6 +95,11 @@ class TrainingConfig:
     lstm_layers: int = 2
     transformer_heads: int = 4
     transformer_layers: int = 2
+
+    # GNN-IDEC (within-batch k-NN graph + GCN encoder)
+    gnn_k_neighbors: int = 10
+    gnn_hidden_dim: int = 128
+    gnn_num_layers: int = 2
     
     # General
     weight_decay: float = 1e-5
@@ -267,6 +274,19 @@ class DeepClusteringTrainer:
                 lstm_layers=self.config.lstm_layers,
                 transformer_heads=self.config.transformer_heads,
                 transformer_layers=self.config.transformer_layers,
+            )
+        elif self.model_type == ModelType.IDEC_GNN:
+            return ImprovedDECGNN(
+                input_dim=self.input_dim,
+                n_clusters=self.config.n_clusters,
+                hidden_dims=self.config.hidden_dims,
+                latent_dim=self.config.latent_dim,
+                gnn_hidden_dim=self.config.gnn_hidden_dim,
+                n_gnn_layers=self.config.gnn_num_layers,
+                k_neighbors=self.config.gnn_k_neighbors,
+                alpha=self.config.alpha,
+                gamma=self.config.gamma,
+                dropout=self.config.dropout,
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
@@ -585,6 +605,7 @@ class DeepClusteringTrainer:
                 ModelType.DMVC,
                 ModelType.IDEC_LSTM,
                 ModelType.IDEC_TRANSFORMER,
+                ModelType.IDEC_GNN,
             ]:
                 if epoch % self.config.update_interval == 0:
                     target_dist = self._compute_target_distribution(data)
@@ -606,6 +627,16 @@ class DeepClusteringTrainer:
                     epoch_losses['clustering'] += loss.item()
                     
                 elif self.model_type == ModelType.IDEC:
+                    q, z, x_recon = self.model(x)
+                    p = target_dist[batch_idx * self.config.finetune_batch_size:
+                                   (batch_idx + 1) * self.config.finetune_batch_size].to(self.device)
+                    kl_loss = kl_divergence_loss(q, p)
+                    recon_loss = reconstruction_loss(x, x_recon)
+                    loss = kl_loss + self.config.gamma * recon_loss
+                    epoch_losses['clustering'] += kl_loss.item()
+                    epoch_losses['reconstruction'] += recon_loss.item()
+
+                elif self.model_type == ModelType.IDEC_GNN:
                     q, z, x_recon = self.model(x)
                     p = target_dist[batch_idx * self.config.finetune_batch_size:
                                    (batch_idx + 1) * self.config.finetune_batch_size].to(self.device)
@@ -753,6 +784,9 @@ class DeepClusteringTrainer:
                     q_list.append(q.cpu())
                 elif self.model_type == ModelType.DMVC:
                     q, _, _, _, _ = self.model(x)
+                    q_list.append(q.cpu())
+                elif self.model_type == ModelType.IDEC_GNN:
+                    q, _, _ = self.model(x)
                     q_list.append(q.cpu())
         
         q_all = torch.cat(q_list, dim=0)
@@ -971,6 +1005,9 @@ class DeepClusteringTrainer:
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
                     q, _, _ = self.model(x)
                     pred = q.argmax(dim=1)
+                elif self.model_type == ModelType.IDEC_GNN:
+                    q, _, _ = self.model(x)
+                    pred = q.argmax(dim=1)
                 elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
                     q, _, _ = self.model(x)
                     pred = q.argmax(dim=1)
@@ -1003,6 +1040,9 @@ class DeepClusteringTrainer:
                 x = batch[0].to(self.device)
                 
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
+                    q, _, _ = self.model(x)
+                    probs.append(q.cpu().numpy())
+                elif self.model_type == ModelType.IDEC_GNN:
                     q, _, _ = self.model(x)
                     probs.append(q.cpu().numpy())
                 elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
@@ -1046,6 +1086,7 @@ class DeepClusteringTrainer:
             ModelType.DMVC,
             ModelType.IDEC_LSTM,
             ModelType.IDEC_TRANSFORMER,
+            ModelType.IDEC_GNN,
         ]:
             return self.model.clustering_layer.cluster_centers.detach().cpu().numpy()
         elif self.model_type == ModelType.VADE:

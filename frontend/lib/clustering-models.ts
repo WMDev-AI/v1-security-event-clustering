@@ -8,6 +8,7 @@ export const CLUSTERING_MODEL_SHORT: Record<string, string> = {
   dmvc: 'DMVC',
   idec_lstm: 'IDEC-LSTM',
   idec_transformer: 'IDEC-Tr',
+  idec_gnn: 'IDEC-GNN',
 }
 
 /** Full display names (aligned with training-config MODEL_INFO) */
@@ -20,6 +21,7 @@ export const CLUSTERING_MODEL_DISPLAY: Record<string, string> = {
   dmvc: 'Deep Multi-View Clustering (DMVC)',
   idec_lstm: 'IDEC with LSTM sequence encoder',
   idec_transformer: 'IDEC with Transformer sequence encoder',
+  idec_gnn: 'IDEC with Graph Neural Network (GCN)',
 }
 
 export function clusteringModelDisplayName(
