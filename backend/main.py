@@ -75,6 +75,7 @@ class ModelTypeEnum(str, Enum):
     VADE = "vade"
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
+    DMVC = "dmvc"
 
 
 class TrainingRequest(BaseModel):
@@ -135,6 +136,8 @@ class AnalysisResponse(BaseModel):
     summary: dict
     intrinsic_metrics: Optional[dict] = None
     latent_visualization: Optional[dict] = None
+    model_type: Optional[str] = None
+    training_loss: Optional[dict] = None
 
 
 # Helper functions
@@ -237,6 +240,8 @@ async def run_training(
         async def finetune_callback(epoch, metrics):
             training_jobs[job_id]["current_epoch"] = total_pretrain + epoch + 1
             training_jobs[job_id]["stage_epoch"] = epoch + 1
+            if isinstance(metrics, dict) and metrics.get("total_loss") is not None:
+                training_jobs[job_id]["current_loss"] = float(metrics["total_loss"])
             training_jobs[job_id]["metrics"] = metrics
             progress_pct = (epoch + 1) / config.finetune_epochs
             training_jobs[job_id]["stage_progress"] = progress_pct * 100
@@ -244,6 +249,15 @@ async def run_training(
             await asyncio.sleep(0.05)  # yield control after each epoch
         
         await trainer.finetune(features, progress_callback=finetune_callback)
+        training_jobs[job_id]["stages_completed"].append("fine-tuning")
+
+        finetune_loss = None
+        if trainer.history.get("total_loss"):
+            finetune_loss = {
+                "total_loss": float(trainer.history["total_loss"][-1]),
+                "clustering_loss": float(trainer.history["clustering_loss"][-1]),
+                "reconstruction_loss": float(trainer.history["reconstruction_loss"][-1]),
+            }
         
         # Refinement stage
         training_jobs[job_id]["stage"] = "postprocessing"
@@ -286,14 +300,20 @@ async def run_training(
             "profiles": profiles,
             "summary": summary,
             "feature_mean": features.mean(axis=0),
-            "feature_std": features.std(axis=0) + 1e-8
+            "feature_std": features.std(axis=0) + 1e-8,
+            "model_type": training_jobs[job_id].get("model_type"),
+            "training_loss": finetune_loss,
         }
         
         training_jobs[job_id]["status"] = "completed"
         training_jobs[job_id]["progress"] = 100
         training_jobs[job_id]["stage_progress"] = 100
         training_jobs[job_id]["message"] = "Training completed successfully"
-        training_jobs[job_id]["metrics"] = ClusteringMetrics.compute_all(labels, features=latent)
+        final_intrinsic = ClusteringMetrics.compute_all(labels, features=latent)
+        if finetune_loss:
+            training_jobs[job_id]["current_loss"] = finetune_loss["total_loss"]
+            final_intrinsic = {**finetune_loss, **final_intrinsic}
+        training_jobs[job_id]["metrics"] = final_intrinsic
         training_jobs[job_id]["refinement"] = refinement_info
         
     except Exception as e:
@@ -346,6 +366,11 @@ async def list_models():
                 "id": "ufcm",
                 "name": "Deep Unconstrained Fuzzy C-Means (UFCM)",
                 "description": "UC-FCM objective in latent space: gradient descent on fuzzy clustering with optimal memberships given centers, plus optional reconstruction regularization"
+            },
+            {
+                "id": "dmvc",
+                "name": "Deep Multi-View Clustering (DMVC)",
+                "description": "Two view-specific autoencoders (first/second half of features), fused latent with DEC-style KL clustering plus reconstruction and cross-view latent alignment"
             }
         ]
     }
@@ -491,7 +516,9 @@ async def get_results(job_id: str):
         clusters=clusters,
         summary=summary,
         intrinsic_metrics=intrinsic_metrics,
-        latent_visualization=visualization
+        latent_visualization=visualization,
+        model_type=model_data.get("model_type"),
+        training_loss=model_data.get("training_loss"),
     )
 
 

@@ -30,6 +30,7 @@ from deep_clustering import (
     VaDE,
     ContrastiveDeepClustering,
     DeepUFCM,
+    DeepMultiViewClustering,
     SecurityEventAutoEncoder,
     reconstruction_loss,
     kl_divergence_loss,
@@ -44,6 +45,7 @@ class ModelType(str, Enum):
     VADE = "vade"
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
+    DMVC = "dmvc"
 
 
 @dataclass
@@ -65,9 +67,10 @@ class TrainingConfig:
     finetune_lr: float = 1e-4
     finetune_batch_size: int = 256
     
-    # DEC/IDEC specific
+    # DEC/IDEC / DMVC specific
     alpha: float = 1.0
-    gamma: float = 0.1  # Weight for reconstruction loss in IDEC
+    gamma: float = 0.1  # Weight for reconstruction loss in IDEC / DMVC
+    mvc_weight: float = 0.1  # Multi-view latent alignment (DMVC)
     update_interval: int = 5  # Update target distribution every N epochs
     tol: float = 0.001  # Stopping tolerance
     
@@ -213,6 +216,15 @@ class DeepClusteringTrainer:
                 dropout=self.config.dropout,
                 fuzziness_m=self.config.fuzziness_m,
             )
+        elif self.model_type == ModelType.DMVC:
+            return DeepMultiViewClustering(
+                input_dim=self.input_dim,
+                n_clusters=self.config.n_clusters,
+                hidden_dims=self.config.hidden_dims,
+                latent_dim=self.config.latent_dim,
+                alpha=self.config.alpha,
+                dropout=self.config.dropout,
+            )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
     
@@ -248,6 +260,11 @@ class DeepClusteringTrainer:
             # For contrastive, we pretrain the encoder differently
             await self._pretrain_contrastive(loader, progress_callback)
             self.is_pretrained = True
+            return
+        elif self.model_type == ModelType.DMVC:
+            await self._pretrain_dmvc(loader, progress_callback)
+            self.is_pretrained = True
+            print("Pretraining complete!")
             return
         else:
             autoencoder = self.model.autoencoder if hasattr(self.model, 'autoencoder') else self.model.dec.autoencoder
@@ -346,6 +363,50 @@ class DeepClusteringTrainer:
             
             if (epoch + 1) % 10 == 0:
                 print(f"Contrastive Pretrain Epoch {epoch + 1}/{self.config.pretrain_epochs}, Loss: {avg_loss:.6f}")
+
+    async def _pretrain_dmvc(
+        self,
+        loader: DataLoader,
+        progress_callback: Optional[Callable[[int, float], Awaitable[None]]] = None,
+    ):
+        """Pretrain both view autoencoders with reconstruction only."""
+        params = list(self.model.ae1.parameters()) + list(self.model.ae2.parameters())
+        optimizer = optim.Adam(
+            params,
+            lr=self.config.pretrain_lr,
+            weight_decay=self.config.weight_decay,
+        )
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+        dim_v1 = self.model.dim_v1
+        self.model.ae1.train()
+        self.model.ae2.train()
+        for epoch in range(self.config.pretrain_epochs):
+            epoch_loss = 0.0
+            n_batches = 0
+            for batch in loader:
+                x = batch[0].to(self.device)
+                x1 = x[:, :dim_v1]
+                x2 = x[:, dim_v1:]
+                optimizer.zero_grad()
+                _, r1 = self.model.ae1(x1)
+                _, r2 = self.model.ae2(x2)
+                loss = reconstruction_loss(x1, r1) + reconstruction_loss(x2, r2)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                n_batches += 1
+            avg_loss = epoch_loss / max(n_batches, 1)
+            self.history["pretrain_loss"].append(avg_loss)
+            scheduler.step()
+            if progress_callback:
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(epoch, avg_loss)
+                else:
+                    progress_callback(epoch, avg_loss)
+            if (epoch + 1) % 10 == 0:
+                print(
+                    f"DMVC Pretrain Epoch {epoch + 1}/{self.config.pretrain_epochs}, Loss: {avg_loss:.6f}"
+                )
     
     async def initialize_clusters(self, data: np.ndarray, progress_callback: Optional[Callable[[float], Awaitable[None]]] = None) -> np.ndarray:
         """Initialize cluster centers using K-Means on latent space
@@ -474,7 +535,7 @@ class DeepClusteringTrainer:
         self.model.train()
         for epoch in range(self.config.finetune_epochs):
             # Compute target distribution periodically
-            if self.model_type in [ModelType.DEC, ModelType.IDEC]:
+            if self.model_type in [ModelType.DEC, ModelType.IDEC, ModelType.DMVC]:
                 if epoch % self.config.update_interval == 0:
                     target_dist = self._compute_target_distribution(data)
             
@@ -502,6 +563,23 @@ class DeepClusteringTrainer:
                     recon_loss = reconstruction_loss(x, x_recon)
                     loss = kl_loss + self.config.gamma * recon_loss
                     epoch_losses['clustering'] += kl_loss.item()
+                    epoch_losses['reconstruction'] += recon_loss.item()
+
+                elif self.model_type == ModelType.DMVC:
+                    q, z, x_recon, z1, z2 = self.model(x)
+                    p = target_dist[batch_idx * self.config.finetune_batch_size:
+                                   (batch_idx + 1) * self.config.finetune_batch_size].to(self.device)
+                    kl_loss = kl_divergence_loss(q, p)
+                    recon_loss = reconstruction_loss(x, x_recon)
+                    mvc_loss = F.mse_loss(z1, z2)
+                    loss = (
+                        kl_loss
+                        + self.config.gamma * recon_loss
+                        + self.config.mvc_weight * mvc_loss
+                    )
+                    epoch_losses['clustering'] += (
+                        kl_loss.item() + self.config.mvc_weight * mvc_loss.item()
+                    )
                     epoch_losses['reconstruction'] += recon_loss.item()
                     
                 elif self.model_type == ModelType.VADE:
@@ -553,23 +631,30 @@ class DeepClusteringTrainer:
             self.history['total_loss'].append(epoch_losses['total'])
             self.history['clustering_loss'].append(epoch_losses['clustering'])
             self.history['reconstruction_loss'].append(epoch_losses['reconstruction'])
-            
-            # Compute metrics periodically
+
+            # Progress payload every epoch (loss always; intrinsic metrics on eval cadence)
+            report = {
+                "total_loss": float(epoch_losses['total']),
+                "clustering_loss": float(epoch_losses['clustering']),
+                "reconstruction_loss": float(epoch_losses['reconstruction']),
+            }
             if (epoch + 1) % 5 == 0:
                 metrics = self._evaluate(data, labels_true)
                 self.history['metrics'].append(metrics)
-                
-                if progress_callback:
-                    if inspect.iscoroutinefunction(progress_callback):
-                        await progress_callback(epoch, metrics)
-                    else:
-                        progress_callback(epoch, metrics)
-                
-                print(f"Epoch {epoch + 1}/{self.config.finetune_epochs}, "
-                      f"Loss: {epoch_losses['total']:.6f}, "
-                      f"Silhouette: {metrics.get('silhouette', 'N/A'):.4f}")
-                
-                # Check for convergence
+                report.update(metrics)
+
+                silhouette_val = metrics.get('silhouette')
+                if isinstance(silhouette_val, (int, float)):
+                    silhouette_display = f"{silhouette_val:.4f}"
+                else:
+                    silhouette_display = "N/A"
+
+                print(
+                    f"Epoch {epoch + 1}/{self.config.finetune_epochs}, "
+                    f"Loss: {epoch_losses['total']:.6f}, "
+                    f"Silhouette: {silhouette_display}"
+                )
+
                 current_labels = self.predict(data)
                 if prev_labels is not None:
                     delta = np.sum(current_labels != prev_labels) / len(current_labels)
@@ -577,7 +662,16 @@ class DeepClusteringTrainer:
                         print(f"Converged at epoch {epoch + 1} (delta={delta:.6f})")
                         break
                 prev_labels = current_labels
-        
+            elif self.history.get("metrics"):
+                # Keep last intrinsic metrics in UI between eval epochs
+                report.update(self.history["metrics"][-1])
+
+            if progress_callback:
+                if inspect.iscoroutinefunction(progress_callback):
+                    await progress_callback(epoch, report)
+                else:
+                    progress_callback(epoch, report)
+
         print("Fine-tuning complete!")
     
     def _compute_target_distribution(self, data: np.ndarray) -> torch.Tensor:
@@ -592,6 +686,9 @@ class DeepClusteringTrainer:
                 x = batch[0].to(self.device)
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
                     q, _, _ = self.model(x)
+                    q_list.append(q.cpu())
+                elif self.model_type == ModelType.DMVC:
+                    q, _, _, _, _ = self.model(x)
                     q_list.append(q.cpu())
         
         q_all = torch.cat(q_list, dim=0)
@@ -810,6 +907,9 @@ class DeepClusteringTrainer:
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
                     q, _, _ = self.model(x)
                     pred = q.argmax(dim=1)
+                elif self.model_type == ModelType.DMVC:
+                    q, _, _, _, _ = self.model(x)
+                    pred = q.argmax(dim=1)
                 elif self.model_type == ModelType.VADE:
                     _, _, _, _, gamma = self.model(x)
                     pred = gamma.argmax(dim=1)
@@ -837,6 +937,9 @@ class DeepClusteringTrainer:
                 
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
                     q, _, _ = self.model(x)
+                    probs.append(q.cpu().numpy())
+                elif self.model_type == ModelType.DMVC:
+                    q, _, _, _, _ = self.model(x)
                     probs.append(q.cpu().numpy())
                 elif self.model_type == ModelType.VADE:
                     _, _, _, _, gamma = self.model(x)
@@ -867,7 +970,7 @@ class DeepClusteringTrainer:
     
     def get_cluster_centers(self) -> Optional[np.ndarray]:
         """Get cluster centers if available"""
-        if self.model_type in [ModelType.DEC, ModelType.IDEC]:
+        if self.model_type in [ModelType.DEC, ModelType.IDEC, ModelType.DMVC]:
             return self.model.clustering_layer.cluster_centers.detach().cpu().numpy()
         elif self.model_type == ModelType.VADE:
             return self.model.mu_c.detach().cpu().numpy()

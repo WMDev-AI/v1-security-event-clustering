@@ -2,7 +2,7 @@ const API_BASE = 'http://localhost:8000/api';
 
 export interface TrainingRequest {
   events: string[];
-  model_type: 'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm';
+  model_type: 'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm' | 'dmvc';
   n_clusters: number;
   latent_dim: number;
   hidden_dims: number[];
@@ -25,6 +25,9 @@ export interface TrainingProgress {
   current_loss: number;
   metrics: Record<string, unknown> | null;
   message: string;
+  /** Clustering algorithm id (e.g. idec, dmvc); set when the job is created */
+  model_type?: string;
+  n_clusters?: number;
   stages_completed?: string[];  // e.g., ["pretraining"]
   refinement?: {
     applied: boolean;
@@ -91,6 +94,14 @@ export interface AnalysisResponse {
     size_std?: number;
     size_min?: number;
     size_max?: number;
+  } | null;
+  /** Algorithm id from the training job */
+  model_type?: string | null;
+  /** Final fine-tune batch-averaged losses from the last epoch */
+  training_loss?: {
+    total_loss?: number;
+    clustering_loss?: number;
+    reconstruction_loss?: number;
   } | null;
   latent_visualization: {
     points: { x: number; y: number; cluster: number }[];

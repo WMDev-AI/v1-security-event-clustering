@@ -9,12 +9,15 @@ import {
   Cpu,
   Activity,
   Zap,
-  Settings2,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { Badge } from '@/components/ui/badge'
 import type { TrainingProgress as TrainingProgressType } from '@/lib/api'
+import {
+  clusteringModelDisplayName,
+  CLUSTERING_MODEL_SHORT,
+} from '@/lib/clustering-models'
 
 interface TrainingProgressProps {
   progress: TrainingProgressType
@@ -54,10 +57,23 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
 
   const isTraining = ['training', 'starting'].includes(progress.status)
 
+  const lossLabel =
+    progress.stage === 'pretraining'
+      ? 'Pretrain loss'
+      : progress.stage === 'fine-tuning'
+        ? 'Fine-tune loss'
+        : 'Loss'
+
+  const fmt = (v: unknown) => {
+    const n = typeof v === 'number' ? v : Number(v)
+    if (Number.isFinite(n)) return n.toFixed(4)
+    return '—'
+  }
+
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-base flex items-center gap-2">
             <Brain className="h-4 w-4" />
             Training Progress
@@ -67,6 +83,19 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
             <span className="ml-1.5 capitalize">{progress.status}</span>
           </Badge>
         </div>
+        {progress.model_type && (
+          <div className="flex flex-wrap items-center gap-2 pt-2 text-sm text-muted-foreground">
+            <Badge variant="outline" className="font-mono text-xs">
+              {CLUSTERING_MODEL_SHORT[progress.model_type] ?? progress.model_type}
+            </Badge>
+            <span className="leading-snug">
+              {clusteringModelDisplayName(progress.model_type)}
+            </span>
+            {progress.n_clusters != null && (
+              <span className="text-xs">· {progress.n_clusters} clusters</span>
+            )}
+          </div>
+        )}
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Progress Bar */}
@@ -93,10 +122,12 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
           <div className="bg-muted/50 rounded-lg p-3 text-center">
             <div className="flex items-center justify-center gap-1.5 text-muted-foreground mb-1">
               <Cpu className="h-3.5 w-3.5" />
-              <span className="text-xs">Loss</span>
+              <span className="text-xs">{lossLabel}</span>
             </div>
             <div className="text-lg font-mono">
-              {progress.current_loss.toFixed(4)}
+              {Number.isFinite(progress.current_loss)
+                ? progress.current_loss.toFixed(4)
+                : '—'}
             </div>
           </div>
 
@@ -221,18 +252,46 @@ export function TrainingProgress({ progress }: TrainingProgressProps) {
         {/* Metrics Preview */}
         {progress.metrics && (
           <div className="border-t pt-4">
-            <h4 className="text-sm font-medium mb-2">Current Metrics</h4>
+            <h4 className="text-sm font-medium mb-2">
+              {progress.stage === 'fine-tuning'
+                ? 'Fine-tuning (live)'
+                : 'Current Metrics'}
+            </h4>
             <div className="grid grid-cols-2 gap-2 text-sm">
+              {progress.metrics.total_loss !== undefined && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Total loss</span>
+                  <span className="font-mono">{fmt(progress.metrics.total_loss)}</span>
+                </div>
+              )}
+              {progress.metrics.clustering_loss !== undefined && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Clustering term</span>
+                  <span className="font-mono">{fmt(progress.metrics.clustering_loss)}</span>
+                </div>
+              )}
+              {progress.metrics.reconstruction_loss !== undefined && (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Reconstruction</span>
+                  <span className="font-mono">
+                    {fmt(progress.metrics.reconstruction_loss)}
+                  </span>
+                </div>
+              )}
               {progress.metrics.silhouette !== undefined && (
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Silhouette Score</span>
-                  <span className="font-mono">{Number(progress.metrics.silhouette).toFixed(4)}</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted-foreground">Silhouette</span>
+                  <span className="font-mono">
+                    {Number(progress.metrics.silhouette).toFixed(4)}
+                  </span>
                 </div>
               )}
               {progress.metrics.n_clusters_found !== undefined && (
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-muted-foreground">Clusters Found</span>
-                  <span className="font-mono">{Number(progress.metrics.n_clusters_found)}</span>
+                  <span className="font-mono">
+                    {Number(progress.metrics.n_clusters_found)}
+                  </span>
                 </div>
               )}
             </div>

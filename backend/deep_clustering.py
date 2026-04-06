@@ -662,6 +662,96 @@ class DeepUFCM(nn.Module):
         return labels
 
 
+class DeepMultiViewClustering(nn.Module):
+    """
+    Deep Multi-View Clustering (DMVC) for security event feature vectors.
+
+    The input is split into two views (first half / second half of features). Each view
+    has its own autoencoder; latent codes are fused by averaging, then clustered with the
+    same Student-t / KL framework as DEC/IDEC. A multi-view consistency term (MSE between
+    view latents) encourages aligned representations across views.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        n_clusters: int,
+        hidden_dims: list[int] = None,
+        latent_dim: int = 32,
+        alpha: float = 1.0,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        if input_dim < 2:
+            raise ValueError("DeepMultiViewClustering requires input_dim >= 2 for two views")
+        self.input_dim = input_dim
+        self.dim_v1 = input_dim // 2
+        self.dim_v2 = input_dim - self.dim_v1
+        self.latent_dim = latent_dim
+        self.n_clusters = n_clusters
+
+        if hidden_dims is None:
+            hidden_dims = [256, 128, 64]
+
+        self.ae1 = SecurityEventAutoEncoder(
+            input_dim=self.dim_v1,
+            hidden_dims=hidden_dims,
+            latent_dim=latent_dim,
+            dropout=dropout,
+        )
+        self.ae2 = SecurityEventAutoEncoder(
+            input_dim=self.dim_v2,
+            hidden_dims=hidden_dims,
+            latent_dim=latent_dim,
+            dropout=dropout,
+        )
+        self.clustering_layer = ClusteringLayer(
+            n_clusters=n_clusters,
+            latent_dim=latent_dim,
+            alpha=alpha,
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Fused latent used for visualization and downstream APIs."""
+        x1 = x[:, : self.dim_v1]
+        x2 = x[:, self.dim_v1 :]
+        z1 = self.ae1.encode(x1)
+        z2 = self.ae2.encode(x2)
+        return 0.5 * (z1 + z2)
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        x1 = x[:, : self.dim_v1]
+        x2 = x[:, self.dim_v1 :]
+        z1, r1 = self.ae1(x1)
+        z2, r2 = self.ae2(x2)
+        z = 0.5 * (z1 + z2)
+        q = self.clustering_layer(z)
+        x_recon = torch.cat([r1, r2], dim=1)
+        return q, z, x_recon, z1, z2
+
+    def initialize_clusters(self, data_loader: DataLoader, device: torch.device):
+        """K-means on fused latent codes."""
+        self.eval()
+        latent_vectors = []
+        with torch.no_grad():
+            for batch in data_loader:
+                if isinstance(batch, (list, tuple)):
+                    x = batch[0].to(device)
+                else:
+                    x = batch.to(device)
+                z = self.encode(x)
+                latent_vectors.append(z.cpu().numpy())
+        latent_vectors = np.concatenate(latent_vectors, axis=0)
+        kmeans = KMeans(n_clusters=self.n_clusters, n_init=20, random_state=42)
+        kmeans.fit(latent_vectors)
+        self.clustering_layer.cluster_centers.data = torch.tensor(
+            kmeans.cluster_centers_, dtype=torch.float32, device=device
+        )
+        return kmeans.labels_
+
+
 # Loss functions for deep clustering
 
 def reconstruction_loss(x: torch.Tensor, x_recon: torch.Tensor) -> torch.Tensor:

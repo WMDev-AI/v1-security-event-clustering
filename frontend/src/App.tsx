@@ -31,6 +31,7 @@ import {
   type AnalysisResponse,
   type InsightsResponse,
 } from '@/lib/api'
+import { clusteringModelDisplayName } from '@/lib/clustering-models'
 
 type AppState = 'idle' | 'configuring' | 'training' | 'completed' | 'error'
 
@@ -117,7 +118,7 @@ export default function App() {
       }
     }
 
-    pollInterval = setInterval(poll, 1500)
+    pollInterval = setInterval(poll, 800)
     poll()
 
     return () => {
@@ -153,6 +154,13 @@ export default function App() {
 
   const formatMetric = (value?: number) => {
     if (value === undefined || value === null || value < 0 || Number.isNaN(value)) {
+      return 'N/A'
+    }
+    return value.toFixed(4)
+  }
+
+  const formatLossMetric = (value?: number | null) => {
+    if (value === undefined || value === null || Number.isNaN(value)) {
       return 'N/A'
     }
     return value.toFixed(4)
@@ -347,6 +355,17 @@ export default function App() {
 
         {state === 'completed' && results && (
           <div className="space-y-6">
+            {results.model_type && (
+              <Card className="border-primary/20 bg-primary/5">
+                <CardHeader className="pb-2">
+                  <CardDescription>Clustering algorithm</CardDescription>
+                  <CardTitle className="text-lg leading-snug">
+                    {clusteringModelDisplayName(results.model_type)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+            )}
+
             <div className="grid gap-4 md:grid-cols-4">
               <Card>
                 <CardHeader className="pb-2">
@@ -378,7 +397,7 @@ export default function App() {
               </Card>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
               <Card>
                 <CardHeader className="pb-2">
                   <CardDescription>Silhouette Score</CardDescription>
@@ -400,6 +419,30 @@ export default function App() {
                   <CardDescription>Calinski-Harabasz Score</CardDescription>
                   <CardTitle className="text-2xl">
                     {formatMetric(results.intrinsic_metrics?.calinski_harabasz)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Fine-tune total loss</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatLossMetric(results.training_loss?.total_loss ?? null)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Clustering loss term</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatLossMetric(results.training_loss?.clustering_loss ?? null)}
+                  </CardTitle>
+                </CardHeader>
+              </Card>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardDescription>Reconstruction loss term</CardDescription>
+                  <CardTitle className="text-2xl">
+                    {formatLossMetric(results.training_loss?.reconstruction_loss ?? null)}
                   </CardTitle>
                 </CardHeader>
               </Card>

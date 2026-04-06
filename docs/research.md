@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), Variational Deep Embedding (VaDE), contrastive deep clustering, and deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM). The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
+This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), Variational Deep Embedding (VaDE), contrastive deep clustering, deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM), and **Deep Multi-View Clustering (DMVC)** with a two-view split of the feature vector and DEC-style clustering on a fused latent code. The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
 
 ---
 
@@ -68,7 +68,7 @@ Many practical systems still use static features with shallow clustering, then a
 
 Relative to prior lines, this implementation combines:
 
-- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM),
+- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM and dual-encoder multi-view fusion via DMVC),
 - intrinsic metric-aware selection and monitoring,
 - bounded ensemble refinement after fine-tuning,
 - direct integration with security insight generation.
@@ -156,8 +156,8 @@ Hence, this problem is worth pursuing because it addresses both scientific chall
 
 This implementation contributes the following engineering-research elements:
 
-- Multi-family deep clustering support in one pipeline (DEC/IDEC/VaDE/contrastive/UFCM).
-- Stage-aware training orchestration and real-time progress reporting.
+- Multi-family deep clustering support in one pipeline (DEC/IDEC/VaDE/contrastive/UFCM/DMVC).
+- Stage-aware training orchestration and real-time progress reporting, including **per-epoch fine-tune loss decomposition** (`total_loss`, `clustering_loss`, `reconstruction_loss`) exposed through the training-status API and persisted on the results payload.
 - Intrinsic metric computation integrated into both training and result APIs.
 - Post-fine-tuning latent ensemble refinement:
   - multi-algorithm search (K-means, GMM, agglomerative),
@@ -223,9 +223,9 @@ This data-flow figure describes how raw security telemetry is transformed into a
 - `**D: Normalization**`: standardizes each feature dimension using dataset mean and variance so that distance computations in later steps are stable and comparable.
 - `**E: Deep Representation Learning**`: the encoder part of the selected deep clustering model maps normalized features into a latent embedding space where cluster geometry is more separable.
 - `**F: Cluster Initialization**`: produces initial cluster seeds/assignments (e.g., via GMM/K-means in latent space or model-specific initialization) to prevent degenerate clustering updates.
-- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/VaDE/contrastive/UFCM) to refine both latent geometry and soft assignment structure.
+- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/VaDE/contrastive/UFCM/DMVC) to refine both latent geometry and soft assignment structure.
 - `**H: Latent Embeddings Z**`: stores the learned embedding vectors $z_i=f_\theta(x_i)$ for all events, which are the basis for final clustering and metrics.
-- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows).
+- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows; for DMVC, argmax over Student-$t$ soft assignments $q$ on the fused latent).
 - `**J: Latent Ensemble Refinement**`: performs a bounded search over alternative latent partitions (algorithm choice, cluster-count candidates, and projection variants) to improve intrinsic quality.
 - `**K: Final Labels**`: selects the refined labels and treats them as the canonical clustering result for downstream profiling.
 - `**L: Intrinsic Metrics**`: computes Silhouette, Davies–Bouldin, and Calinski–Harabasz from the same latent representation used for clustering, enabling consistent quality reporting.
@@ -254,7 +254,7 @@ Runtime components (Figure 4.2 — text form for standard Markdown preview):
        │    ▼                ▼                ▼
        │ Event parser   DeepClusteringTrainer   Cluster analyzer
        │                    │  │                 Security insights engine
-       │                    │  ├─► Model family (DEC / IDEC / VaDE / Contrastive / UFCM)
+       │                    │  ├─► Model family (DEC / IDEC / VaDE / Contrastive / UFCM / DMVC)
        │                    │  └─► Latent refinement engine
        │                    │
        └────────────────────┴── results / metrics / insights
@@ -268,7 +268,7 @@ This runtime component view explains where each transformation is executed and h
 - `**API: FastAPI Service**`: exposes HTTP endpoints (train, status, results, cluster events, insights) and coordinates background training so the UI thread stays responsive.
 - `**PARSER: Event Parser**`: reused by the API to parse raw strings into structured events and then to produce normalized feature matrices for training.
 - `**TRAINER: DeepClusteringTrainer**`: encapsulates model training logic, including pretraining, initialization, fine-tuning, and inference of latent embeddings and soft assignments.
-- `**MODELS: DEC / IDEC / VaDE / Contrastive / UFCM**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM).
+- `**MODELS: DEC / IDEC / VaDE / Contrastive / UFCM / DMVC**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM and dual-view fusion for DMVC).
 - `**REFINE: Latent Refinement Engine**`: post-processes model output using intrinsic metrics by exploring candidate partitions under time and validity constraints.
 - `**ANALYZER: Cluster Analyzer**`: consumes refined labels and events to compute cluster-level profiles (representative events, top entities, severity distributions, etc.).
 - `**INSIGHTS: Security Insights Engine**`: maps cluster profiles into higher-level intelligence (risk assessment, attack pattern hints, and correlations).
@@ -298,9 +298,9 @@ Training stages (Figure 4.3 — text form for standard Markdown preview):
 Stage transitions make the end-to-end compute schedule explicit. This is especially important for security analytics UX, because the UI needs to distinguish model convergence from expensive bounded post-processing. Each stage corresponds to a specific technical operation:
 
 - `**parsing**`: converts raw event strings into structured events and a normalized feature matrix; errors here typically reflect schema problems or unsupported input formats.
-- `**pretraining**`: learns an embedding manifold that supports clustering by reconstruction (DEC/IDEC/VaDE/UFCM) or contrastive invariance (contrastive).
+- `**pretraining**`: learns an embedding manifold that supports clustering by reconstruction (DEC/IDEC/VaDE/UFCM), **dual-view reconstruction** (DMVC: two autoencoders on feature halves), or contrastive invariance (contrastive).
 - `**initialization**`: establishes initial cluster assignments/seeds in latent space; deep clustering objectives are sensitive to this step, and poor seeds can lead to collapse-like solutions.
-- `**fine_tuning**`: optimizes the selected deep clustering objective while periodically updating assignments/targets and monitoring intrinsic metrics and assignment drift.
+- `**fine_tuning**`: optimizes the selected deep clustering objective while periodically updating assignments/targets and monitoring intrinsic metrics and assignment drift; the implementation reports **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **every epoch** to the job status channel (with intrinsic metrics on a coarser cadence), and stores the **final epoch** scalars on the completed job and `/results` response.
 - `**postprocessing**`: refines the final discrete partition via latent ensemble search (varying algorithm type, candidate cluster counts, and latent projections) under a strict runtime budget and validity constraints (e.g., minimum cluster size).
 - `**completed**`: the API can safely return final results (labels, intrinsic metrics, latent visualization, and cluster profiles).
 - `**failed**`: any unrecoverable error in the corresponding stage triggers this terminal state, allowing the UI to surface a diagnostic message rather than waiting indefinitely.
@@ -644,13 +644,57 @@ Hyperparameters: **fuzziness** $m>1$ (default $2$) and **reconstruction weight**
 - **DEC/IDEC** use Student-$t$ kernels and KL targets; UFCM uses **powered fuzzy memberships** and the UC-FCM reduction—different inductive bias for the same latent encoder backbone.
 - **Contrastive** stresses augmentation invariance; UFCM stresses **continuous overlap** between clusters; they address different failure modes (noise vs. boundary ambiguity).
 
-## 6.6 Model Selection Guidance (Beginner-Friendly)
+## 6.6 Deep Multi-View Clustering (DMVC)
+
+### Beginner intuition
+
+**Multi-view clustering** traditionally assumes several **sensors** or **feature sets** describing the same objects. This codebase implements a **deep multi-view** variant on a **single** $d$-dimensional event vector by **splitting features into two contiguous blocks** (first half / second half). Each block is encoded by its own autoencoder; latent codes $z^{(1)}$ and $z^{(2)}$ are averaged to a **fused** embedding $z=\frac12(z^{(1)}+z^{(2)})$. Clustering then follows the **same Student-$t$ + KL refinement** framework as DEC/IDEC on $z$, while reconstruction and a **cross-view latent alignment** term encourage both views to agree and to preserve input information.
+
+### Why this can help
+
+- When feature engineering orders dimensions so that **early vs. late** fields capture **complementary** behavior (e.g., categorical/context vs. numeric/network-derived), separate encoders can reduce **negative transfer** compared to one monolithic encoder.
+- The **MSE$(z^{(1)},z^{(2)})$** penalty (weighted by `mvc_weight`) acts as a **consistency regularizer**, discouraging view-specific collapse.
+
+### Loss summary (implementation-aligned)
+
+Let $x=[x^{(1)};x^{(2)}]$ be the concatenation of the two halves, $\hat{x}$ the concatenation of decoders applied to each view latent, $q$ Student-$t$ soft assignments on $z$, and $p$ the DEC-style target distribution. Fine-tuning minimizes (batch mean):
+
+$\mathcal{L}_{\mathrm{total}}=\mathrm{KL}(q\,\Vert\,p)+\gamma\,\mathcal{L}_{\mathrm{rec}}+\lambda_{\mathrm{mvc}}\,\mathcal{L}_{\mathrm{mvc}}$
+
+with $\mathcal{L}_{\mathrm{rec}}=\mathrm{MSE}(x,\hat{x})$, $\mathcal{L}_{\mathrm{mvc}}=\mathrm{MSE}(z^{(1)},z^{(2)})$, $\gamma=$ `TrainingConfig.gamma`, $\lambda_{\mathrm{mvc}}=$ `TrainingConfig.mvc_weight`.
+
+**Training monitors** append to `DeepClusteringTrainer.history` each epoch:
+
+- **`total_loss`**: scalar loss backpropagated (matches $\mathcal{L}_{\mathrm{total}}$ up to batch averaging).
+- **`reconstruction_loss`**: batch-averaged $\mathcal{L}_{\mathrm{rec}}$.
+- **`clustering_loss`**: remainder attributed in code to the **non-reconstruction** part (KL plus the MVC contribution as weighted for logging—see `trainer.py` DMVC branch).
+
+The HTTP **job status** and **`/results`** payload surface these three names for operators and dashboards alongside intrinsic metrics (Silhouette, DBI, CH).
+
+### Pipeline stages
+
+1. **Pretraining**: train **both** view autoencoders by minimizing $\mathrm{MSE}(x^{(1)},\hat{x}^{(1)})+\mathrm{MSE}(x^{(2)},\hat{x}^{(2)})$.
+2. **Initialization**: K-means on **fused** latents $z$ initializes `ClusteringLayer` centroids.
+3. **Fine-tuning**: joint optimization of encoders, decoders, clustering layer, and (implicitly) view agreement via $\mathcal{L}_{\mathrm{mvc}}$.
+
+### Limitations
+
+- Views are **positional**, not guaranteed semantically distinct; arbitrary splits may yield little benefit.
+- Requires $d\ge 2$; very small $d$ makes asymmetric half-splits noisy.
+
+### Relation to other families
+
+- **IDEC/DEC**: DMVC **shares** the same KL + target-distribution mechanism on $z$; it **adds** explicit two-branch encoders and view consistency.
+- **UFCM**: different assignment geometry (fuzzy memberships vs. Student-$t$); DMVC does **not** expose fuzzy memberships.
+
+## 6.7 Model Selection Guidance (Beginner-Friendly)
 
 - **IDEC (recommended default)**: best first choice when you want balanced quality, stability, and interpretability.
 - **DEC**: use when you need a simpler/faster cluster-focused baseline.
 - **VaDE**: use when probabilistic membership and uncertainty are important to your analysis.
 - **Contrastive**: use when data noise is high and invariance learning is a priority.
 - **UFCM**: use when clusters are expected to **overlap**, when you want **explicit fuzzy memberships** per event, or when you wish to study **borderline** / ambiguous security behaviors without switching to a full VAE mixture.
+- **DMVC**: use when the **feature vector is intentionally structured** into two meaningful halves (or as an experiment when you suspect complementary early/late feature groups); treat as a **specialized** variant of the DEC/IDEC family, not a drop-in replacement on arbitrary permutations of dimensions.
 
 A practical workflow is:
 
@@ -658,7 +702,8 @@ A practical workflow is:
 2. compare against DEC as a simpler baseline,
 3. try VaDE if ambiguity/uncertainty modeling is needed,
 4. try contrastive models when input noise or variability is severe,
-5. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question.
+5. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question,
+6. try DMVC when a **two-view feature layout** is plausible and you want explicit cross-view latent agreement.
 
 ---
 
@@ -673,7 +718,7 @@ This training strategy is designed to balance three goals that often conflict in
 2. **Initialization**: estimate cluster seeds in latent space.
   Cluster-aware methods are strongly initialization-dependent; this stage computes initial assignments/centers (e.g., K-means/GMM/model-specific initialization) so fine-tuning starts from a plausible partition.
 3. **Fine-tuning**: optimize clustering-aware objective.
-  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/VaDE/contrastive/UFCM), while periodic metrics monitor whether separation improves or degrades.
+  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/VaDE/contrastive/UFCM/DMVC), while periodic metrics monitor whether separation improves or degrades. The trainer logs **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **each epoch** for API/UI consumption (see §7.3 implementation note).
 4. **Postprocessing**: bounded latent ensemble refinement with constraints.
   After model optimization, discrete labels are refined via constrained search in latent space (algorithm and $K$ variants) to recover better intrinsic partitions without retraining encoder weights.
 
@@ -732,6 +777,8 @@ For practical reporting, training snapshots should include:
 - latest loss values,
 - latest intrinsic metrics,
 - elapsed time and estimated completion signals.
+
+**Implementation note (this repository):** during **fine-tuning**, the trainer invokes the async progress callback **once per epoch** with a dictionary that always contains **`total_loss`**, **`clustering_loss`**, and **`reconstruction_loss`** (batch-averaged scalars for that epoch). **Silhouette**, **Davies–Bouldin**, and **Calinski–Harabasz** are computed every fifth epoch and merged into the same dictionary; between those evaluations the **last** intrinsic snapshot is re-attached so polling clients retain stable quality readouts. After training, **`GET /results`** includes optional **`training_loss`** with the **final epoch** values of the same three keys, plus **`model_type`**, alongside intrinsic metrics recomputed on refined labels.
 
 ### 7.4 Operational Progress Semantics
 
@@ -1149,7 +1196,7 @@ For stronger reproducibility, also record:
 
 ### 12.2 Core Experiments
 
-1. **Model family comparison**: DEC vs IDEC vs VaDE vs contrastive vs UFCM.
+1. **Model family comparison**: DEC vs IDEC vs VaDE vs contrastive vs UFCM vs DMVC.
 2. **Latent dimension sweep**: impact of $m$ on separability.
 3. **Cluster count sensitivity**: fixed $K$ vs adaptive search.
 4. **Refinement ablation**:
@@ -1172,7 +1219,8 @@ Report mean and standard deviation for:
 - DBI,
 - CH,
 - cluster-size dispersion,
-- runtime breakdown per stage.
+- runtime breakdown per stage,
+- final-epoch **fine-tune** `total_loss`, `clustering_loss`, and `reconstruction_loss` when comparing model families or hyperparameters (values returned by the API as `training_loss`).
 
 Include variability statistics for rigorous reporting:
 
@@ -1188,7 +1236,7 @@ This section gives **illustrative** experimental summaries that match the evalua
 ### 13.1 Setup (aligned with the codebase)
 
 - **Input**: $N \approx 10^4$–$10^5$ parsed key=value events; per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
-- **Models**: DEC, IDEC, VaDE, contrastive, UFCM; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.)
+- **Models**: DEC, IDEC, VaDE, contrastive, UFCM, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
 - **Refinement**: latent ensemble search with time budget $T_{\max}\approx 8\,\mathrm{s}$, sampled Silhouette for scoring (Section 9).
 - **Metrics**: Silhouette ($S$, higher better), Davies–Bouldin ($\mathrm{DBI}$, lower better), Calinski–Harabasz ($\mathrm{CH}$, higher better), all computed in **latent space** on final assignments unless stated otherwise.
 
@@ -1214,9 +1262,10 @@ Values are rounded to two decimals; CH scaled for readability. DBI and CH are on
 | IDEC | 0.12 | 2.1 | 6.8 |
 | VaDE | 0.11 | 2.2 | 6.4 |
 | UFCM | 0.10 | 2.2 | 6.5 |
+| DMVC | 0.10 | 2.2 | 6.4 |
 | Contrastive | 0.09 | 2.4 | 5.9 |
 
-IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
+IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. DMVC’s relative position depends strongly on whether the **feature half-split** matches meaningful structure; the table entry is **illustrative** only. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
 
 ### 13.4 Table 3 — Ablations: encoder and refinement
 
@@ -1353,7 +1402,7 @@ Further high-impact directions include:
 This system implements a production-aware deep clustering framework for security event intelligence, integrating:
 
 - representation learning,
-- cluster-aware optimization across DEC, IDEC, VaDE, contrastive, and UFCM families,
+- cluster-aware optimization across DEC, IDEC, VaDE, contrastive, UFCM, and DMVC families,
 - intrinsic metric evaluation,
 - bounded latent ensemble refinement,
 - and threat-centric interpretation.

@@ -69,12 +69,19 @@ const MODEL_INFO = {
       'UC-FCM-style fuzzy clustering in latent space: optimal memberships from current centers, optimized by gradient descent (IEEE TPAMI 2025), with light reconstruction regularization.',
     pros: ['Soft memberships', 'Smooth optimization vs alternating FCM'],
     best_for: 'Overlapping clusters and gradual threat behavior boundaries'
+  },
+  dmvc: {
+    name: 'Deep Multi-View Clustering (DMVC)',
+    description:
+      'Splits the feature vector into two views (first and second half), trains a separate autoencoder per view, fuses latents for clustering with the same Student-t / KL objective as DEC/IDEC, and aligns view latents with an MSE consistency term.',
+    pros: ['Multi-view structure', 'Reconstruction + clustering'],
+    best_for: 'When natural feature groups exist (e.g. early vs late dimensions) or you want explicit cross-view agreement'
   }
 }
 
 export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEvents, preloadedFilename }: TrainingConfigProps) {
   const [events, setEvents] = useState<string>(preloadedEvents?.join('\n') || '')
-  const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm'>('idec')
+  const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm' | 'dmvc'>('idec')
   const [nClusters, setNClusters] = useState(10)
   const [latentDim, setLatentDim] = useState(32)
   const [pretrainEpochs, setPretrainEpochs] = useState(30)

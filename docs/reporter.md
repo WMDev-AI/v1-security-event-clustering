@@ -12,7 +12,7 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 |--------|-----------|------|
 | API gateway | `backend/main.py` | FastAPI app mounted at `/api`; CORS; job orchestration; insight endpoints |
 | Featurization | `backend/event_parser.py` | Parse `key=value` logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
-| Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive / **DeepUFCM** modules and loss helpers |
+| Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive / **DeepUFCM** / **DeepMultiViewClustering (DMVC)** modules and loss helpers |
 | Training & metrics | `backend/trainer.py` | `DeepClusteringTrainer`, `TrainingConfig`, `ClusteringMetrics`, latent refinement |
 | Cluster narratives | `backend/cluster_analyzer.py` | `ClusterProfile`, per-cluster stats, summaries |
 | SOC intelligence | `backend/security_insights.py` | `SecurityInsightsEngine`, MITRE-style insights, correlations |
@@ -71,13 +71,13 @@ Base URL (default): `http://localhost:8000/api`
 
 - **Request**: none.
 - **Response**: `{ "models": [ { "id", "name", "description" }, ... ] }`  
-  - `id`: `dec` | `idec` | `vade` | `contrastive` | `ufcm`.
+  - `id`: `dec` | `idec` | `vade` | `contrastive` | `ufcm` | `dmvc`.
 
 ### 2.4 `POST /train`
 
 - **Request body** (`TrainingRequest`):
   - `events` (string[], required) — raw lines; **minimum 100** events.
-  - `model_type` — `dec` | `idec` | `vade` | `contrastive` | `ufcm` (default `idec`).
+  - `model_type` — `dec` | `idec` | `vade` | `contrastive` | `ufcm` | `dmvc` (default `idec`).
   - `n_clusters` (int, 2–100) — must satisfy `n_clusters <= len(events) // 10`.
   - `latent_dim` (int, 8–256).
   - `hidden_dims` (int[]) — encoder/decoder widths.
@@ -91,6 +91,8 @@ Base URL (default): `http://localhost:8000/api`
 - **Response**: dict (job state). Aligns with `TrainingProgress` plus extra keys:
   - Core: `job_id`, `status` (`queued` | `parsing` | `training` | `completed` | `failed`), `progress` (0–100), `stage` (`pretraining` | `initialization` | `fine-tuning` | `postprocessing`, etc.), `stage_progress`, `current_epoch`, `total_epochs`, `stage_epoch`, `stage_total_epochs`, `current_loss`, `metrics`, `message`, `stages_completed`.
   - Often present: `model_type`, `n_events`, `n_clusters`, `created_at`.
+  - **`current_loss`**: during **pretraining**, the latest pretrain reconstruction (or VAE/contrastive) loss; during **fine-tuning**, updated **every epoch** to the batch-averaged **total** optimization objective for that epoch (same scalar minimized by backprop).
+  - **`metrics`** (during/after training): may include **fine-tune decomposition** while `stage === 'fine-tuning'` — `total_loss`, `clustering_loss`, `reconstruction_loss` (batch means for the last completed epoch). Intrinsic scores (`silhouette`, `davies_bouldin`, `calinski_harabasz`, …) are merged in on every fifth fine-tune epoch and **carried forward** between those evaluations so polling clients keep seeing the latest Silhouette. On **completion**, `metrics` is replaced with a merge of final intrinsic metrics and the **last epoch’s** three loss scalars.
   - After completion: `refinement` may mirror refinement info (`applied`, `method`, `elapsed_seconds`, `time_budget_hit`, etc.).
 - **Errors**: `404` if unknown `job_id`.
 
@@ -103,6 +105,8 @@ Base URL (default): `http://localhost:8000/api`
   - `summary`: dict from `ClusterAnalyzer.generate_cluster_summary` (threat distribution, critical/high cluster ids, top indicators, sizes, etc.).
   - `intrinsic_metrics`: Silhouette, Davies–Bouldin, Calinski–Harabasz, cluster counts/sizes, etc., or null if not computable.
   - `latent_visualization`: `{ "points": [{ "x", "y", "cluster" }], "explained_variance": number[] }` (PCA-2D).
+  - `model_type` (optional string): algorithm id for the job (e.g. `idec`, `dmvc`), echoed from training.
+  - `training_loss` (optional object or null): **final fine-tune epoch** batch-averaged scalars — `total_loss`, `clustering_loss`, `reconstruction_loss` — persisted from `DeepClusteringTrainer.history` when the job completes (same definitions as in live `metrics` during fine-tuning; see §5.4).
 - **Errors**: `400` if training not completed; `404` if no results.
 
 ### 2.7 `POST /predict`
@@ -190,7 +194,7 @@ These are defined in `backend/main.py` unless noted.
 
 ### 3.1 `ModelTypeEnum`
 
-- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM` → serialized as lowercase strings for JSON.
+- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` → serialized as lowercase strings for JSON.
 
 ### 3.2 `TrainingRequest`
 
@@ -210,7 +214,7 @@ These are defined in `backend/main.py` unless noted.
 
 ### 3.6 `AnalysisResponse`
 
-- Top-level analysis payload for `/results/{job_id}` (§2.6).
+- Top-level analysis payload for `/results/{job_id}` (§2.6): includes optional `model_type` and `training_loss` (final-epoch fine-tune loss breakdown).
 
 ### 3.7 `FileUploadResponse`
 
@@ -245,10 +249,10 @@ These are defined in `backend/main.py` unless noted.
   2. Build `DeepClusteringTrainer(input_dim, model_type, config)`.
   3. `pretraining` — async `pretrain_callback` updates epoch loss and progress (~0–50% overall).
   4. `initialization` — `initialize_clusters`; `init_callback` maps 0–100% stage to ~50–75% overall.
-  5. `fine-tuning` — `finetune` with metric callback; overall progress uses same band as callback implementation.
+  5. `fine-tuning` — `finetune` with async callback **invoked every epoch**: payload includes `total_loss`, `clustering_loss`, `reconstruction_loss` (batch averages) plus intrinsic metrics on every fifth epoch (with last intrinsic snapshot re-attached between evals). `stages_completed` gains `fine-tuning` after this step.
   6. `postprocessing` — `predict` → `get_latent_representations` → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` → `get_cluster_probabilities` (for **UFCM**, each row is **fuzzy membership** over clusters; **refined** hard `labels` may differ from `argmax(probs)` when refinement accepts a better partition).
-  7. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`.
-  8. Mark `completed`, final `ClusteringMetrics.compute_all` on refined labels + latent.
+  7. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`, plus **`model_type`** (string) and **`training_loss`** (dict of last-epoch `total_loss` / `clustering_loss` / `reconstruction_loss`).
+  8. Mark `completed`, set `training_jobs[job_id]["metrics"]` to **merge** final intrinsic metrics with the same final loss scalars; keep `current_loss` as final `total_loss`.
 - **Callbacks**: `refine_progress_callback` updates `stage_progress` and overall `progress` (95–100%), logs to stdout, `await asyncio.sleep(0.05)` for event-loop yield.
 
 ### 4.3 `delayed_training(job_id, events, config, model_type)`
@@ -265,11 +269,11 @@ These are defined in `backend/main.py` unless noted.
 
 ### 5.1 `ModelType` (Enum)
 
-- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM` (string values match API).
+- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` (string values match API).
 
 ### 5.2 `TrainingConfig` (dataclass)
 
-- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC `alpha`, `gamma`, `update_interval`, `tol`, VaDE `beta`, contrastive `temperature`, **UFCM** `fuzziness_m` ($>1$, FCM fuzzifier, default `2.0`), `ufcm_recon_weight` (MSE reconstruction scale on $x$, default `0.1`), `weight_decay`, `device`.
+- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC/**DMVC** `alpha`, `gamma`, `update_interval`, `tol`, **DMVC** `mvc_weight` (weight on cross-view latent MSE, default `0.1`), VaDE `beta`, contrastive `temperature`, **UFCM** `fuzziness_m` ($>1$, FCM fuzzifier, default `2.0`), `ufcm_recon_weight` (MSE reconstruction scale on $x$, default `0.1`), `weight_decay`, `device`.
 - **`__post_init__`**: default `hidden_dims` to `[256, 128, 64]` if `None`.
 
 ### 5.3 `ClusteringMetrics`
@@ -289,19 +293,19 @@ These are defined in `backend/main.py` unless noted.
 | Method | Parameters | Role / flow |
 |--------|------------|-------------|
 | `__init__` | `input_dim`, `model_type`, `config` | `_create_model()`, move to device |
-| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or **UFCM** (autoencoder only) or contrastive pretrain; updates `history` |
-| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; **UFCM** uses `DeepUFCM.initialize_clusters` (K-means on $z$ → `cluster_centers`); contrastive path has multi-init K-means with progress |
-| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, metrics)` | Main clustering loop; DEC/IDEC target distribution; **UFCM** batch loss $(u^m \odot d^2)$ mean + `ufcm_recon_weight` * MSE recon; periodic `_evaluate` |
+| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or **UFCM** (autoencoder only), **`_pretrain_dmvc`** (dual view AEs), or contrastive pretrain; updates `history` |
+| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; **UFCM** uses `DeepUFCM.initialize_clusters` (K-means on $z$ → `cluster_centers`); **DMVC** uses `DeepMultiViewClustering.initialize_clusters` (K-means on **fused** latent); contrastive path has multi-init K-means with progress |
+| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, report)` | Main clustering loop; **DEC/IDEC/DMVC** share DEC-style target $p$ and KL; **DMVC** adds $\gamma$ MSE recon on full $x$ + `mvc_weight` $\cdot$ MSE$(z^{(1)},z^{(2)})$ with clustering term absorbing KL + weighted MVC in logged `clustering_loss`; **UFCM** batch fuzzy objective + recon; **callback every epoch** with `total_loss` / `clustering_loss` / `reconstruction_loss` plus intrinsic metrics on every 5th epoch |
 | `refine_cluster_assignments` | `latent`, `initial_labels`, optional hyperparams, async `progress_callback` | Scaled latent; K-means/GMM/agglomerative trials; sampled Silhouette; time budget; returns best labels + info dict |
 | `predict` | `data` | Hard labels from model soft assignments |
 | `get_cluster_probabilities` | `data` | Soft assignment matrix |
 | `get_latent_representations` | `data` | Encoder outputs $z$ |
-| `get_cluster_centers` | — | DEC/IDEC/VaDE/**UFCM** centers if defined (`DeepUFCM.cluster_centers`) |
+| `get_cluster_centers` | — | DEC/IDEC/**DMVC**/VaDE/**UFCM** centers if defined (`DeepUFCM.cluster_centers`; DMVC uses `clustering_layer.cluster_centers`) |
 | `save_model` / `load_model` | path | Torch checkpoint |
 
 #### Private helpers
 
-- `_create_model`, `_pretrain_contrastive`, `_compute_target_distribution`, `_vade_loss`, `_evaluate`.
+- `_create_model`, `_pretrain_contrastive`, `_pretrain_dmvc`, `_compute_target_distribution`, `_vade_loss`, `_evaluate`.
 
 ---
 
@@ -367,6 +371,18 @@ These are defined in `backend/main.py` unless noted.
   - `forward(x)` → `(u, z, x_recon)` with `u` from `fuzzy_membership(z)`.
   - `initialize_clusters(data_loader, device)` — full pass for $z$, **sklearn KMeans** on $z$, copy centroids into `cluster_centers`; returns hard K-means labels (for logging only; fine-tuning then optimizes fuzzy objective).
 
+### 6.11 `DeepMultiViewClustering` (DMVC)
+
+- **Purpose**: **Deep multi-view clustering** on a **single** feature vector by treating the **first half** and **second half** of dimensions as two views. Each view has its own `SecurityEventAutoEncoder`; latents $z^{(1)}, z^{(2)}$ are **averaged** to $z=\frac12(z^{(1)}+z^{(2)})$ for a shared `ClusteringLayer` (Student-$t$ soft assignments, same DEC/IDEC-style target sharpening).
+- **Constraints**: `input_dim >= 2`; `dim_v1 = input_dim // 2`, `dim_v2 = input_dim - dim_v1`.
+- **Members**: `ae1`, `ae2`, `clustering_layer`, `n_clusters`, `latent_dim`, `dim_v1`, `dim_v2`.
+- **Methods**:
+  - `encode(x)` → fused $z$.
+  - `forward(x)` → `(q, z, x_recon, z1, z2)` with `x_recon = cat(decoded view1, decoded view2)` matching full input width.
+  - `initialize_clusters` — K-means on fused $z$; sets `clustering_layer.cluster_centers`.
+
+See **§6B** for loss composition and API notes.
+
 ---
 
 ## 6A. UFCM — extended reference (algorithm, stack integration, and semantics)
@@ -412,11 +428,11 @@ These are **not** yet exposed on the public `TrainingRequest` Pydantic model in 
 
 ### 6A.6 How UFCM differs from other families (quick matrix)
 
-| Aspect | DEC / IDEC | VaDE | Contrastive | **UFCM** |
-|--------|------------|------|-------------|----------|
-| Soft output | Student-$t$ $q$, KL to $p$ | GMM posterior $\gamma$ | `cluster_head` softmax | **FCM** $u_{ik}$ from distances |
-| Latent geometry pressure | KL (+ recon IDEC) | ELBO + mixture | Contrastive + consistency | **Weighted fuzzy distortion** + recon |
-| Centers | `ClusteringLayer` params | `mu_c` | implicit in head | **`cluster_centers`** in $\mathbb{R}^{m}$ |
+| Aspect | DEC / IDEC | VaDE | Contrastive | **UFCM** | **DMVC** |
+|--------|------------|------|-------------|----------|----------|
+| Soft output | Student-$t$ $q$, KL to $p$ | GMM posterior $\gamma$ | `cluster_head` softmax | **FCM** $u_{ik}$ from distances | Student-$t$ $q$, KL to $p$ (on fused $z$) |
+| Latent geometry pressure | KL (+ recon IDEC) | ELBO + mixture | Contrastive + consistency | **Weighted fuzzy distortion** + recon | KL + $\gamma$ recon + **view alignment** |
+| Centers | `ClusteringLayer` params | `mu_c` | implicit in head | **`cluster_centers`** in $\mathbb{R}^{m}$ | `ClusteringLayer` on fused $z$ |
 
 ### 6A.7 Analyst and metrics caveats
 
@@ -425,7 +441,37 @@ These are **not** yet exposed on the public `TrainingRequest` Pydantic model in 
 
 ### 6A.8 Reference publication
 
-For citations and equivalence claims to **UC-FCM**, use the TPAMI 2025 paper (DOI `10.1109/TPAMI.2025.3532357`). Full theoretical discussion: `docs/research.md` §6.5–6.6.
+For citations and equivalence claims to **UC-FCM**, use the TPAMI 2025 paper (DOI `10.1109/TPAMI.2025.3532357`). Full theoretical discussion: `docs/research.md` §6.5–6.7.
+
+---
+
+## 6B. DMVC — extended reference (algorithm, stack integration, and semantics)
+
+This subsection ties **Deep Multi-View Clustering** to concrete files and runtime behavior (companion to `docs/research.md` §6.6).
+
+### 6B.1 Objective (fine-tuning)
+
+Per batch, the trainer minimizes:
+
+$\mathcal{L} = \mathrm{KL}(q\,\Vert\,p) + \gamma\,\mathcal{L}_{\mathrm{rec}} + \lambda_{\mathrm{mvc}}\,\mathcal{L}_{\mathrm{mvc}}\quad\text{(batch means)}$
+
+with $\mathcal{L}_{\mathrm{rec}}=\mathrm{MSE}(x,\hat{x})$, $\mathcal{L}_{\mathrm{mvc}}=\mathrm{MSE}(z^{(1)},z^{(2)})$, $q$ from `ClusteringLayer` on fused $z$, $p$ the DEC-style sharpened target, $\gamma=$ `TrainingConfig.gamma`, $\lambda_{\mathrm{mvc}}=$ `TrainingConfig.mvc_weight`. Reconstruction $\hat{x}$ concatenates the two view decoders over the split input.
+
+**Logged scalars** (API / `history`): `total_loss` $=\mathcal{L}$ (mean); `reconstruction_loss` $=\mathcal{L}_{\mathrm{rec}}$; `clustering_loss` aggregates the **non-reconstruction** part attributed in code (KL plus the MVC term weighted for logging).
+
+### 6B.2 Pretraining
+
+**Dual** view autoencoders are trained with **sum** of per-view MSE reconstruction (`_pretrain_dmvc`); there is no single-module `autoencoder` on `DeepMultiViewClustering`.
+
+### 6B.3 API and UI
+
+- **`GET /api/models`**: includes `id: "dmvc"`.
+- **`POST /api/train`**: `model_type: "dmvc"` → `ModelType.DMVC` → `DeepMultiViewClustering`.
+- **Progress/results**: same loss field semantics as other families (§2.5, §2.6); the SPA shows **algorithm name** during training and **fine-tune total / clustering / reconstruction** terms on the results grid alongside Silhouette, DBI, and CH.
+
+### 6B.4 Practical note on “views”
+
+Views are **positional splits** of the handcrafted vector, not separate sensors. DMVC is useful when feature groups are ordered such that early vs late dimensions carry complementary structure; it is not a substitute for true multi-sensor fusion without feature-order design.
 
 ---
 
@@ -610,7 +656,7 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 ## 10. Frontend API layer (`frontend/lib/api.ts`)
 
 - **Constants**: `API_BASE = 'http://localhost:8000/api'`.
-- **Interfaces**: `TrainingRequest`, `TrainingProgress`, `SecurityEvent`, `ClusterResult`, `FileUploadResponse`, `AnalysisResponse`, plus extended types for insights, IOCs, MITRE (`InsightsResponse`, `IOCsResponse`, `MITREResponse`, etc.).
+- **Interfaces**: `TrainingRequest`, `TrainingProgress`, `SecurityEvent`, `ClusterResult`, `FileUploadResponse`, `AnalysisResponse` (includes optional `model_type`, `training_loss`), plus extended types for insights, IOCs, MITRE (`InsightsResponse`, `IOCsResponse`, `MITREResponse`, etc.).
 - **Functions**: `startTraining`, `getTrainingStatus`, `getResults`, `getClusterEvents`, `getThreatIndicatorEvents`, `getDemoEvents`, `uploadEventLog`, `getModels`, `checkHealth`, `getSecurityInsights`, `getClusterInsights`, `getIOCs`, `getMITREMapping`, `getMITREEvents` — each maps to the corresponding REST path documented in §2 (including §2.8a and §2.17).
 
 ---
@@ -629,6 +675,8 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 | `profiles` | `list[ClusterProfile]` |
 | `summary` | Summary dict |
 | `feature_mean`, `feature_std` | Vectors used conceptually for consistent normalization (training batch stats) |
+| `model_type` | String id (`idec`, `dmvc`, …) for display and `/results` |
+| `training_loss` | Dict: final-epoch `total_loss`, `clustering_loss`, `reconstruction_loss` (nullable for legacy in-memory jobs) |
 
 ---
 
@@ -695,7 +743,7 @@ Runs only when `jobId` is set **and** `state === 'training'`.
 
 1. **Concurrency guard**: `isPolling` flag avoids overlapping polls.
 2. **Abort**: creates `AbortController` per tick; passes `signal` to `getTrainingStatus(jobId, signal)` so an in-flight request is aborted when the effect cleans up or a new tick starts.
-3. **Interval**: `setInterval(poll, 1500)` plus **immediate** `poll()` on subscribe.
+3. **Interval**: `setInterval(poll, 800)` plus **immediate** `poll()` on subscribe (faster refresh of fine-tune loss).
 4. **On `status === 'completed'`**: `getResults(jobId)` → `setResults`, `setState('completed')`; then `getSecurityInsights(jobId)` with `insightsLoading` true/false (errors logged, non-fatal).
 5. **On `status === 'failed'`**: `setError(status.message)`, `setState('error')`.
 6. **Fetch errors**: `AbortError` ignored; others `console.error`.
@@ -708,6 +756,7 @@ Runs only when `jobId` is set **and** `state === 'training'`.
 | `handleStartTraining(config)` | `TrainingConfig` submit | Clears error/results; `setState('training')`; `startTraining(config)` → `setJobId(job_id)`; on catch sets error + `error` state. |
 | `handleReset` | **New Analysis** / **Try Again** | Resets to `idle`, clears `jobId`, `progress`, `results`, `insights`, loading, `error`. |
 | `formatMetric(value)` | Render intrinsic metrics | Returns `'N/A'` if undefined, negative, or NaN; else fixed decimals. |
+| `formatLossMetric(value)` | Training loss cards on results | `'N/A'` if null/undefined/NaN; else fixed decimals (allows non-negative losses including zero). |
 | Inline **Get Started** | Button click | `setState('configuring')` (disabled when backend not online). |
 | Inline **Back** (configuring) | Button click | `setState('idle')`, clear `loadedEvents`, `uploadedFilename`. |
 
@@ -738,7 +787,7 @@ Runs only when `jobId` is set **and** `state === 'training'`.
 
 **Local state**
 
-- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType` (`'dec' \| 'idec' \| 'vade' \| 'contrastive' \| 'ufcm'`), `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
+- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType` (`'dec' \| 'idec' \| 'vade' \| 'contrastive' \| 'ufcm' \| 'dmvc'`), `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
 
 **Validation**
 
@@ -750,7 +799,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 
 **UI**
 
-- Model `Select` (options driven from `MODEL_INFO`, including **UFCM** with tooltip copy), sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
+- Model `Select` (options driven from `MODEL_INFO`, including **UFCM** and **DMVC**), sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
 
 ### 12.8 `TrainingProgress` (`frontend/components/training-progress.tsx`)
 
@@ -761,8 +810,9 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 **Behavior**
 
 - Animated progress bar synced to `progress.progress` via short timeout.
+- **Algorithm strip**: when `progress.model_type` is set, shows short badge + full name from `frontend/lib/clustering-models.ts` (`CLUSTERING_MODEL_SHORT`, `clusteringModelDisplayName`) and optional `n_clusters`.
 - Stage checklist: pretraining, initialization, fine-tuning, **Refining cluster assignments** (`stage === 'postprocessing'` shows dedicated bar and percent).
-- Shows epoch, loss, stage; optional `metrics` preview (e.g. silhouette); spinner when status is training-like.
+- Shows epoch, **`current_loss`** with label **Pretrain loss** vs **Fine-tune loss** by `stage`; optional **`metrics`** preview: `total_loss`, `clustering_loss`, `reconstruction_loss`, Silhouette, etc.; spinner when status is training-like.
 
 ### 12.9 `ClusterVisualization` (`frontend/components/cluster-visualization.tsx`)
 
@@ -836,8 +886,9 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 
 ### 12.12 Results view composition (`state === 'completed'`)
 
+- **Algorithm card** (when `results.model_type` is set): full clustering model name via `clusteringModelDisplayName`.
 - **Summary row**: total events, clusters, critical/high counts from `results.summary`.
-- **Intrinsic row**: Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)` (computed on **refined hard** labels + latent; for **UFCM** they do not summarize fuzzy overlap—see §6A.7).
+- **Metrics row** (responsive grid, typically six cards): Silhouette, DBI, CH via `formatMetric(results.intrinsic_metrics)`; **Fine-tune total loss**, **Clustering loss term**, **Reconstruction loss term** via `formatLossMetric(results.training_loss?.…)` (computed on **refined hard** labels + latent for intrinsic columns; loss columns are **last fine-tune epoch** training scalars—see §2.6 / §5.4). For **UFCM**, intrinsic columns do not summarize fuzzy overlap—see §6A.7.
 - **Tabs** (**controlled**: `value={resultsTab}`, `onValueChange={setResultsTab}`; see §12.3 / §12.9a):
   - **Security Insights** → `SecurityInsights` with `insights`, `insightsLoading`, and **`jobId={jobId ?? undefined}`** so MITRE/IOCs/API drill-downs work.
   - **Visualization** → `VisualizationTab` (lazy `ClusterVisualization`) only while the Visualization tab is selected.
