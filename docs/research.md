@@ -295,15 +295,53 @@ Training stages (Figure 4.3 — text form for standard Markdown preview):
 
 
 
-Stage transitions make the end-to-end compute schedule explicit. This is especially important for security analytics UX, because the UI needs to distinguish model convergence from expensive bounded post-processing. Each stage corresponds to a specific technical operation:
+Stage transitions make the end-to-end compute schedule explicit. This is especially important for security analytics UX, because the UI needs to distinguish model convergence from expensive bounded post-processing. The subsections below spell out **why each stage exists** (aim), **what actually runs** (mechanism), **what is produced** (outputs), and **how failures show up** (typical errors).
 
-- `**parsing**`: converts raw event strings into structured events and a normalized feature matrix; errors here typically reflect schema problems or unsupported input formats.
-- `**pretraining**`: learns an embedding manifold that supports clustering by reconstruction (DEC/IDEC/VaDE/UFCM), **dual-view reconstruction** (DMVC: two autoencoders on feature halves), or contrastive invariance (contrastive).
-- `**initialization**`: establishes initial cluster assignments/seeds in latent space; deep clustering objectives are sensitive to this step, and poor seeds can lead to collapse-like solutions.
-- `**fine_tuning**`: optimizes the selected deep clustering objective while periodically updating assignments/targets and monitoring intrinsic metrics and assignment drift; the implementation reports **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **every epoch** to the job status channel (with intrinsic metrics on a coarser cadence), and stores the **final epoch** scalars on the completed job and `/results` response.
-- `**postprocessing**`: refines the final discrete partition via latent ensemble search (varying algorithm type, candidate cluster counts, and latent projections) under a strict runtime budget and validity constraints (e.g., minimum cluster size).
-- `**completed**`: the API can safely return final results (labels, intrinsic metrics, latent visualization, and cluster profiles).
-- `**failed**`: any unrecoverable error in the corresponding stage triggers this terminal state, allowing the UI to surface a diagnostic message rather than waiting indefinitely.
+#### `parsing` — structured events and a numeric design matrix
+
+- **Aim**: Turn heterogeneous log lines into a **single, fixed-dimensional** representation suitable for gradient-based learning. Without this gate, downstream stages would train on invalid tokens, variable-length text, or inconsistent field semantics, which produces unstable clusters and misleading analyst narratives.
+- **Mechanism**: Each raw string is parsed into a structured record (timestamps, addresses, ports, subsystem, action, severity, content-derived cues, etc.), then mapped through a deterministic featurization pipeline into a vector $x_i\in\mathbb{R}^{d}$. The training batch is **column-wise normalized** (zero mean, unit variance per feature with numerical flooring) so distances and neural layers see comparable scales across subsystems and vendors.
+- **Outputs**: A list of parsed events (for profiling and insights) and a matrix $X\in\mathbb{R}^{N\times d}$ consumed by the trainer.
+- **Typical failures**: Unsupported formats, severely malformed lines, or parser exceptions; the job stops here so GPU time is not spent on unusable input.
+
+#### `pretraining` — learn a geometry before hard clustering pressure
+
+- **Aim**: Build an initial **representation manifold** where neighborhood structure reflects security-relevant similarity **before** the model is pushed toward discrete cluster structure. This reduces the risk of trivial solutions (e.g., collapsed latents or assignments driven only by noise) when clustering objectives turn on in fine-tuning.
+- **Mechanism (by family)**:
+  - **DEC / IDEC / VaDE / UFCM (backbone path)**: optimize **reconstruction** (mean squared error between $x$ and decoder output) or, for VaDE, a **VAE-style ELBO** so the encoder learns a smooth latent space; UFCM uses the same autoencoder body but does not yet apply fuzzy cluster pressure.
+  - **DMVC**: train **two** autoencoders on the **first** and **second half** of each feature vector, minimizing the **sum** of per-view reconstruction errors so each view has a viable encoder–decoder before fusion and clustering.
+  - **Contrastive**: optimize **invariance** across light augmentations (e.g., dropout-style views) so the encoder maps perturbed versions of the same event to similar representations—useful when raw logs are noisy or inconsistently tokenized.
+- **Outputs**: Updated weights for encoders/decoders (and related heads), recorded **pretrain loss** per epoch on the job status channel, and `history['pretrain_loss']` in the trainer.
+- **Typical failures**: Numerical instability, OOM, or divergence at extreme learning rates; manifests as non-decreasing pretrain loss or NaNs in parameters.
+
+#### `initialization` — plausible cluster seeds in latent space
+
+- **Aim**: Provide **initial cluster hypotheses** (centroids, mixture parameters, or cluster-layer weights) so fine-tuning starts from a partition that already separates coarse behavior modes. Deep clustering objectives are **non-convex** and **initialization-sensitive**; random or trivial seeds often yield poor local minima (merged clusters, empty clusters, or latents that ignore structure).
+- **Mechanism (by family)**:
+  - **DEC / IDEC / DMVC / UFCM**: encode the full dataset (or fused latent for DMVC), run **K-means** (or equivalent) in latent space, and copy centroids into the model’s cluster parameters (`ClusteringLayer` centers or UFCM’s `cluster_centers`).
+  - **VaDE**: **GMM-style** initialization in latent space (means, variances, mixture weights) aligned with the generative head.
+  - **Contrastive**: latent **K-means** with optional multi-restart selection when configured, sometimes with progress reporting for long corpora.
+- **Outputs**: Initialized cluster centers (or mixture parameters), optional logging of initial label histograms, and flags so fine-tuning can assume clusters are **anchored** in $z$-space.
+- **Typical failures**: Degenerate K-means (e.g., too many clusters for $N$, or duplicate centroids); manifests later as poor Silhouette or collapsed assignments unless refinement recovers.
+
+#### `fine_tuning` — joint representation and clustering objective
+
+- **Aim**: **Jointly** refine embeddings and **soft** cluster structure so that events the analyst would group together sit coherently in latent space **and** under the model’s assignment mechanism. This is where family-specific objectives (KL targets for DEC/IDEC/DMVC, ELBO + mixture for VaDE, contrastive + consistency, fuzzy distortion + recon for UFCM) dominate the loss.
+- **Mechanism**: Stochastic optimization over mini-batches with family-specific forward passes and losses. For DEC/IDEC/DMVC, a **target distribution** over soft assignments is recomputed on a fixed interval and used in a **KL** term; IDEC and DMVC add **reconstruction**; DMVC adds **cross-view latent alignment**. The trainer evaluates **intrinsic metrics** (Silhouette, DBI, CH) on a coarser schedule and can stop early if **assignment drift** between checkpoints falls below a tolerance. **Observability**: every epoch the service exposes **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` on the training job payload; intrinsic metrics are merged every fifth epoch and the last snapshot is carried between those evaluations so polling UIs stay informative. After training, the **final epoch** values of the three loss scalars are stored on the completed job and returned under **`training_loss`** on **`/results`** alongside recomputed intrinsic metrics on refined labels.
+- **Outputs**: Converged (or early-stopped) model weights, `history` time series of losses and periodic metrics, and **base** hard labels from `argmax` of the model’s soft outputs (before optional postprocessing refinement).
+- **Typical failures**: Loss plateaus with poor metrics (objective–metric mismatch), cluster collapse, or instability from aggressive learning rates; may require more pretraining, different $K$, or another model family.
+
+#### `postprocessing` — bounded improvement of discrete labels without retraining
+
+- **Aim**: Improve **intrinsic partition quality** (e.g., Silhouette under a time budget) **without** further gradient updates to the encoder. Neural fine-tuning optimizes a **training loss** that does not exactly equal Silhouette; refinement searches alternative **hard** partitions in latent space to close that gap for reporting and analyst-facing cluster IDs.
+- **Mechanism**: Fix learned embeddings $Z$ and initial hard labels $y^{(0)}$ from the model. Run a **bounded ensemble** of candidate clusterers (e.g., K-means and GMM restarts, optional agglomerative clustering on smaller $N$) on scaled latent features, score candidates with **sampled Silhouette**, and accept a new label vector only if the gain exceeds a minimum threshold. Progress is reported to the UI so users see activity after `Fine-tuning complete!`.
+- **Outputs**: **Refined** integer labels $y^\star$ used for cluster profiles, insights, and displayed metrics; diagnostic metadata (whether refinement applied, method name, elapsed time). **Soft** assignment matrices from the neural forward pass remain available for ambiguity analysis but **hard** results in the API are defined by $y^\star$ after acceptance logic.
+- **Typical failures**: Timeout with no accepted improvement (labels stay at base predictions); rare numerical issues in candidate clusterers on pathological $Z$.
+
+#### Terminal states
+
+- `**completed**`: Parsing, training, and refinement finished successfully; the API may return final **labels**, **intrinsic metrics**, **latent visualization** data, **training_loss** summary, **model_type**, and **cluster profiles** for insights.
+- `**failed**`: An unrecoverable error in any operational stage; the job carries a **stage-specific** message so the client can distinguish parser failures from training failures without hanging indefinitely.
 
 If you observe logs such as `Fine-tuning complete!` without a rapid `completed`, it typically indicates the system is still in `postprocessing` (bounded refinement), not that training is stuck.
 
