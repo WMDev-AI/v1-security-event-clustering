@@ -12,7 +12,9 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 |--------|-----------|------|
 | API gateway | `backend/main.py` | FastAPI app mounted at `/api`; CORS; job orchestration; insight endpoints |
 | Featurization | `backend/event_parser.py` | Parse `key=value` logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
+| Temporal windows | `backend/sequence_featurization.py` | `build_temporal_sequences`, `expand_rows_to_sequences` — $[N,T,d]$ tensors for sequence IDEC (training vs predict) |
 | Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive / **DeepUFCM** / **DeepMultiViewClustering (DMVC)** modules and loss helpers |
+| Sequence IDEC | `backend/sequence_clustering.py` | `SecurityEventSequenceAutoEncoder` (LSTM/Transformer), `DeepEmbeddedClusteringSequence`, `ImprovedDECSequence` |
 | Training & metrics | `backend/trainer.py` | `DeepClusteringTrainer`, `TrainingConfig`, `ClusteringMetrics`, latent refinement |
 | Cluster narratives | `backend/cluster_analyzer.py` | `ClusterProfile`, per-cluster stats, summaries |
 | SOC intelligence | `backend/security_insights.py` | `SecurityInsightsEngine`, MITRE-style insights, correlations |
@@ -26,7 +28,7 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 
 ### 1.3 End-to-end flow (code inspection)
 
-1. Client **POST `/api/train`** with raw event strings → job queued → `run_training` parses via `parse_events_to_features` → `DeepClusteringTrainer.pretrain` → `initialize_clusters` → `finetune` → `predict` + `get_latent_representations` → `refine_cluster_assignments` → `analyze_clusters_from_results` → `trained_models[job_id]` populated.
+1. Client **POST `/api/train`** with raw event strings → job queued → `run_training` parses via `parse_events_to_features` → builds **`train_matrix`** (`[N,d]` or `[N,T,d]` via `_training_feature_matrix` when `idec_lstm` / `idec_transformer`) → `DeepClusteringTrainer.pretrain` → `initialize_clusters` → `finetune` → `predict` + `get_latent_representations` → `refine_cluster_assignments` → `analyze_clusters_from_results` → `trained_models[job_id]` populated (includes `uses_sequence_model`, `seq_len` when applicable).
 2. Client **GET `/api/train/{job_id}`** polls `training_jobs[job_id]` until `status == "completed"`.
 3. Client **GET `/api/results/{job_id}`** loads profiles and recomputes intrinsic metrics on latent vectors.
 
@@ -71,17 +73,18 @@ Base URL (default): `http://localhost:8000/api`
 
 - **Request**: none.
 - **Response**: `{ "models": [ { "id", "name", "description" }, ... ] }`  
-  - `id`: `dec` | `idec` | `vade` | `contrastive` | `ufcm` | `dmvc`.
+  - `id`: `dec` | `idec` | `idec_lstm` | `idec_transformer` | `vade` | `contrastive` | `ufcm` | `dmvc`.
 
 ### 2.4 `POST /train`
 
 - **Request body** (`TrainingRequest`):
   - `events` (string[], required) — raw lines; **minimum 100** events.
-  - `model_type` — `dec` | `idec` | `vade` | `contrastive` | `ufcm` | `dmvc` (default `idec`).
+  - `model_type` — `dec` | `idec` | `idec_lstm` | `idec_transformer` | `vade` | `contrastive` | `ufcm` | `dmvc` (default `idec`).
   - `n_clusters` (int, 2–100) — must satisfy `n_clusters <= len(events) // 10`.
   - `latent_dim` (int, 8–256).
   - `hidden_dims` (int[]) — encoder/decoder widths.
   - `pretrain_epochs`, `finetune_epochs`, `batch_size`, `learning_rate`.
+  - `seq_len` (int, 2–256, default `16`) — temporal window length for **`idec_lstm`** / **`idec_transformer`** only; ignored for other model types. Trainer-side sequence geometry (`seq_hidden`, `lstm_layers`, `transformer_heads`, `transformer_layers`) uses `TrainingConfig` defaults unless extended on the API.
 - **Response**: `{ "job_id": "<uuid>", "message": "Training started" }`.
 - **Errors**: `400` with `detail` if validation fails.
 
@@ -105,7 +108,7 @@ Base URL (default): `http://localhost:8000/api`
   - `summary`: dict from `ClusterAnalyzer.generate_cluster_summary` (threat distribution, critical/high cluster ids, top indicators, sizes, etc.).
   - `intrinsic_metrics`: Silhouette, Davies–Bouldin, Calinski–Harabasz, cluster counts/sizes, etc., or null if not computable.
   - `latent_visualization`: `{ "points": [{ "x", "y", "cluster" }], "explained_variance": number[] }` (PCA-2D).
-  - `model_type` (optional string): algorithm id for the job (e.g. `idec`, `dmvc`), echoed from training.
+  - `model_type` (optional string): algorithm id for the job (e.g. `idec`, `idec_lstm`, `idec_transformer`, `dmvc`), echoed from training.
   - `training_loss` (optional object or null): **final fine-tune epoch** batch-averaged scalars — `total_loss`, `clustering_loss`, `reconstruction_loss` — persisted from `DeepClusteringTrainer.history` when the job completes (same definitions as in live `metrics` during fine-tuning; see §5.4).
 - **Errors**: `400` if training not completed; `404` if no results.
 
@@ -115,7 +118,7 @@ Base URL (default): `http://localhost:8000/api`
 - **Response**: `{ "predictions": [ { "event_index", "cluster_id", "confidence", "probabilities", "event_summary" }, ... ] }`  
   - `probabilities`: per-cluster soft scores (list of float). For **UFCM**, these are **fuzzy membership** weights (non-negative, typically summing to $\approx 1$ per row, same shape as other models’ soft vectors).  
   - `event_summary`: subset of parsed fields.
-- **Note**: Features are normalized with **batch** mean/std of the provided events (same helper as training path for new data).
+- **Note**: Features are normalized with **batch** mean/std of the provided events (same helper as training path for new data). For jobs trained with **`idec_lstm`** / **`idec_transformer`**, the server expands rows to **`[B, seq_len, d]`** via `expand_rows_to_sequences` when no per-event history is available (repeated current vector).
 - **Errors**: `404` if job/model missing.
 
 ### 2.8 `GET /cluster-events/{job_id}/{cluster_id}`
@@ -194,11 +197,11 @@ These are defined in `backend/main.py` unless noted.
 
 ### 3.1 `ModelTypeEnum`
 
-- **Values**: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` → serialized as lowercase strings for JSON.
+- **Values**: `DEC`, `IDEC`, `IDEC_LSTM`, `IDEC_TRANSFORMER`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` → serialized as lowercase strings for JSON (`idec_lstm`, `idec_transformer`).
 
 ### 3.2 `TrainingRequest`
 
-- Fields listed in §2.4. Used only as request body validation.
+- Fields listed in §2.4 (including `seq_len`). Used only as request body validation.
 
 ### 3.3 `PredictRequest` / `AnalyzeRequest`
 
@@ -246,13 +249,14 @@ These are defined in `backend/main.py` unless noted.
   - `model_type` — `trainer.ModelType` enum.
 - **Flow**:
   1. `parsing` → `parse_events_to_features` (on failure: `failed` + message, return).
-  2. Build `DeepClusteringTrainer(input_dim, model_type, config)`.
-  3. `pretraining` — async `pretrain_callback` updates epoch loss and progress (~0–50% overall).
-  4. `initialization` — `initialize_clusters`; `init_callback` maps 0–100% stage to ~50–75% overall.
-  5. `fine-tuning` — `finetune` with async callback **invoked every epoch**: payload includes `total_loss`, `clustering_loss`, `reconstruction_loss` (batch averages) plus intrinsic metrics on every fifth epoch (with last intrinsic snapshot re-attached between evals). `stages_completed` gains `fine-tuning` after this step.
-  6. `postprocessing` — `predict` → `get_latent_representations` → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` → `get_cluster_probabilities` (for **UFCM**, each row is **fuzzy membership** over clusters; **refined** hard `labels` may differ from `argmax(probs)` when refinement accepts a better partition).
-  7. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`, plus **`model_type`** (string) and **`training_loss`** (dict of last-epoch `total_loss` / `clustering_loss` / `reconstruction_loss`).
-  8. Mark `completed`, set `training_jobs[job_id]["metrics"]` to **merge** final intrinsic metrics with the same final loss scalars; keep `current_loss` as final `total_loss`.
+  2. `train_matrix = _training_feature_matrix(features, events, model_type, config)` — **`[N,d]`** for vector models; **`[N, seq_len, d]`** time-sorted windows for **`IDEC_LSTM`** / **`IDEC_TRANSFORMER`** (`build_temporal_sequences`).
+  3. Build `DeepClusteringTrainer(input_dim, model_type, config)`.
+  4. `pretraining` — async `pretrain_callback` updates epoch loss and progress (~0–50% overall); **`pretrain(train_matrix, ...)`** accepts 2D or 3D tensors.
+  5. `initialization` — `initialize_clusters(train_matrix, ...)`; `init_callback` maps 0–100% stage to ~50–75% overall.
+  6. `fine-tuning` — `finetune(train_matrix, ...)` with async callback **invoked every epoch**: payload includes `total_loss`, `clustering_loss`, `reconstruction_loss` (batch averages) plus intrinsic metrics on every fifth epoch (with last intrinsic snapshot re-attached between evals). `stages_completed` gains `fine-tuning` after this step.
+  7. `postprocessing` — `predict` / `get_latent_representations` / `get_cluster_probabilities` on **`train_matrix`** → `await refine_cluster_assignments(..., progress_callback=refine_progress_callback)` (for **UFCM**, each row of `probs` is **fuzzy membership**; **refined** hard `labels` may differ from `argmax(probs)` when refinement accepts a better partition).
+  8. `analyze_clusters_from_results` → store `trained_models[job_id]` dict with `trainer`, `events`, `features`, `labels`, `latent`, `probs`, `refinement_info`, `profiles`, `summary`, `feature_mean`, `feature_std`, plus **`model_type`**, **`training_loss`**, **`uses_sequence_model`** (bool), **`seq_len`** (int; meaningful when sequence model).
+  9. Mark `completed`, set `training_jobs[job_id]["metrics"]` to **merge** final intrinsic metrics with the same final loss scalars; keep `current_loss` as final `total_loss`.
 - **Callbacks**: `refine_progress_callback` updates `stage_progress` and overall `progress` (95–100%), logs to stdout, `await asyncio.sleep(0.05)` for event-loop yield.
 
 ### 4.3 `delayed_training(job_id, events, config, model_type)`
@@ -269,11 +273,11 @@ These are defined in `backend/main.py` unless noted.
 
 ### 5.1 `ModelType` (Enum)
 
-- Members: `DEC`, `IDEC`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` (string values match API).
+- Members: `DEC`, `IDEC`, `IDEC_LSTM`, `IDEC_TRANSFORMER`, `VADE`, `CONTRASTIVE`, `UFCM`, `DMVC` (string values match API).
 
 ### 5.2 `TrainingConfig` (dataclass)
 
-- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC/**DMVC** `alpha`, `gamma`, `update_interval`, `tol`, **DMVC** `mvc_weight` (weight on cross-view latent MSE, default `0.1`), VaDE `beta`, contrastive `temperature`, **UFCM** `fuzziness_m` ($>1$, FCM fuzzifier, default `2.0`), `ufcm_recon_weight` (MSE reconstruction scale on $x$, default `0.1`), `weight_decay`, `device`.
+- **Key fields**: `hidden_dims`, `latent_dim`, `n_clusters`, `dropout`, pretrain/finetune epochs and batch sizes and learning rates, DEC/IDEC/**DMVC** `alpha`, `gamma`, `update_interval`, `tol`, **DMVC** `mvc_weight` (weight on cross-view latent MSE, default `0.1`), **sequence IDEC** `seq_len`, `seq_hidden`, `lstm_layers`, `transformer_heads`, `transformer_layers`, VaDE `beta`, contrastive `temperature`, **UFCM** `fuzziness_m` ($>1$, FCM fuzzifier, default `2.0`), `ufcm_recon_weight` (MSE reconstruction scale on $x$, default `0.1`), `weight_decay`, `device`.
 - **`__post_init__`**: default `hidden_dims` to `[256, 128, 64]` if `None`.
 
 ### 5.3 `ClusteringMetrics`
@@ -293,19 +297,19 @@ These are defined in `backend/main.py` unless noted.
 | Method | Parameters | Role / flow |
 |--------|------------|-------------|
 | `__init__` | `input_dim`, `model_type`, `config` | `_create_model()`, move to device |
-| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or **UFCM** (autoencoder only), **`_pretrain_dmvc`** (dual view AEs), or contrastive pretrain; updates `history` |
-| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; **UFCM** uses `DeepUFCM.initialize_clusters` (K-means on $z$ → `cluster_centers`); **DMVC** uses `DeepMultiViewClustering.initialize_clusters` (K-means on **fused** latent); contrastive path has multi-init K-means with progress |
-| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, report)` | Main clustering loop; **DEC/IDEC/DMVC** share DEC-style target $p$ and KL; **DMVC** adds $\gamma$ MSE recon on full $x$ + `mvc_weight` $\cdot$ MSE$(z^{(1)},z^{(2)})$ with clustering term absorbing KL + weighted MVC in logged `clustering_loss`; **UFCM** batch fuzzy objective + recon; **callback every epoch** with `total_loss` / `clustering_loss` / `reconstruction_loss` plus intrinsic metrics on every 5th epoch |
+| `pretrain` | `data`, optional async `progress_callback(epoch, loss)` | AE or VAE or **UFCM** (autoencoder only), **`_pretrain_dmvc`** (dual view AEs), or contrastive pretrain; **IDEC_LSTM / IDEC_TRANSFORMER** use the same **autoencoder pretrain** path as vector IDEC but `data` is **`[N,T,d]`** and reconstruction targets **`x[:, -1, :]`** (last frame only); updates `history` |
+| `initialize_clusters` | `data`, optional async `progress_callback(pct)` | Latent encoding + K-means or VaDE `initialize_gmm`; **UFCM** uses `DeepUFCM.initialize_clusters` (K-means on $z$ → `cluster_centers`); **DMVC** uses `DeepMultiViewClustering.initialize_clusters` (K-means on **fused** latent); **IDEC_LSTM / IDEC_TRANSFORMER** encode sequences → K-means on $z_t$; contrastive path has multi-init K-means with progress |
+| `finetune` | `data`, optional `labels_true`, async `progress_callback(epoch, report)` | Main clustering loop; **DEC/IDEC/DMVC** and **sequence IDEC** share DEC-style target $p$ and KL; **DMVC** adds $\gamma$ MSE recon on full $x$ + `mvc_weight` $\cdot$ MSE$(z^{(1)},z^{(2)})$ with clustering term absorbing KL + weighted MVC in logged `clustering_loss`; **sequence IDEC** adds $\gamma$ MSE recon on **last row** $x[:,-1,:]$ only; **UFCM** batch fuzzy objective + recon; **callback every epoch** with `total_loss` / `clustering_loss` / `reconstruction_loss` plus intrinsic metrics on every 5th epoch |
 | `refine_cluster_assignments` | `latent`, `initial_labels`, optional hyperparams, async `progress_callback` | Scaled latent; K-means/GMM/agglomerative trials; sampled Silhouette; time budget; returns best labels + info dict |
 | `predict` | `data` | Hard labels from model soft assignments |
 | `get_cluster_probabilities` | `data` | Soft assignment matrix |
 | `get_latent_representations` | `data` | Encoder outputs $z$ |
-| `get_cluster_centers` | — | DEC/IDEC/**DMVC**/VaDE/**UFCM** centers if defined (`DeepUFCM.cluster_centers`; DMVC uses `clustering_layer.cluster_centers`) |
+| `get_cluster_centers` | — | DEC/IDEC/**DMVC**/VaDE/**UFCM**/sequence IDEC centers if defined (`DeepUFCM.cluster_centers`; DMVC and sequence IDEC use `clustering_layer.cluster_centers`) |
 | `save_model` / `load_model` | path | Torch checkpoint |
 
 #### Private helpers
 
-- `_create_model`, `_pretrain_contrastive`, `_pretrain_dmvc`, `_compute_target_distribution`, `_vade_loss`, `_evaluate`.
+- `_create_model`, `_pretrain_contrastive`, `_pretrain_dmvc`, `_uses_sequence_encoder`, `_compute_target_distribution`, `_vade_loss`, `_evaluate`.
 
 ---
 
@@ -441,7 +445,7 @@ These are **not** yet exposed on the public `TrainingRequest` Pydantic model in 
 
 ### 6A.8 Reference publication
 
-For citations and equivalence claims to **UC-FCM**, use the TPAMI 2025 paper (DOI `10.1109/TPAMI.2025.3532357`). Full theoretical discussion: `docs/research.md` §6.5–6.7.
+For citations and equivalence claims to **UC-FCM**, use the TPAMI 2025 paper (DOI `10.1109/TPAMI.2025.3532357`). Full theoretical discussion: `docs/research.md` §6.5–6.8 (UFCM, DMVC, sequence IDEC, model selection).
 
 ---
 
@@ -472,6 +476,37 @@ with $\mathcal{L}_{\mathrm{rec}}=\mathrm{MSE}(x,\hat{x})$, $\mathcal{L}_{\mathrm
 ### 6B.4 Practical note on “views”
 
 Views are **positional splits** of the handcrafted vector, not separate sensors. DMVC is useful when feature groups are ordered such that early vs late dimensions carry complementary structure; it is not a substitute for true multi-sensor fusion without feature-order design.
+
+---
+
+## 6C. Sequence IDEC — extended reference (temporal windows, files, API)
+
+Companion to `docs/research.md` §6.7. **Only** `ModelType.IDEC_LSTM` and `IDEC_TRANSFORMER` use this path; other families consume **`[N,d]`** only.
+
+### 6C.1 Data tensors
+
+- **Training**: `_training_feature_matrix` in `main.py` calls `build_temporal_sequences(features, events, config.seq_len)` → **`float32` tensor shape `[N, T, d]`** with events **time-sorted**; early positions in a window are **padded** by repeating the first available vector when history is short.
+- **Predict / analyze** (new batches): `_inference_feature_matrix` uses `expand_rows_to_sequences(features, seq_len)` so each event becomes **`T` copies** of its normalized vector when no true history is supplied.
+
+### 6C.2 Modules
+
+| File | Role |
+|------|------|
+| `sequence_featurization.py` | Window construction and inference expansion |
+| `sequence_clustering.py` | `SecurityEventSequenceAutoEncoder`, `DeepEmbeddedClusteringSequence`, `ImprovedDECSequence` |
+| `trainer.py` | Branches for `IDEC_LSTM` / `IDEC_TRANSFORMER` in `_create_model`, `pretrain`, `initialize_clusters`, `finetune`, `predict`, `get_latent_representations`, `get_cluster_probabilities` |
+
+Reconstruction loss always targets **the last time step**’s feature vector (current event in the window).
+
+### 6C.3 API and UI
+
+- **`GET /api/models`**: entries for `idec_lstm` and `idec_transformer`.
+- **`POST /api/train`**: optional **`seq_len`** on `TrainingRequest` (defaults `16`); passed into `TrainingConfig`.
+- **Frontend**: `frontend/lib/api.ts` and `training-config.tsx` include these model ids and an advanced control for **`seq_len`** when a sequence model is selected.
+
+### 6C.4 `trained_models[job_id]`
+
+Alongside the usual keys, jobs store **`uses_sequence_model`** (boolean) and **`seq_len`** for consumers that branch on tensor rank or window length.
 
 ---
 
@@ -534,7 +569,7 @@ Views are **positional splits** of the handcrafted vector, not separate sensors.
 
 ## 9. Security analytics: insights, risk, correlations, attack-chain hints, and IOCs
 
-This section documents **`backend/security_insights.py`** and the **API-layer** helpers in **`backend/main.py`** that turn clustered events into SOC-oriented narratives. Everything here is **heuristic and rule-based** unless noted; it does not use the neural clustering loss.
+This section documents **`backend/security_insights.py`** and the **API-layer** helpers in **`backend/main.py`** that turn clustered events into SOC-oriented narratives. Almost everything here is **heuristic and rule-based** unless noted; it does not use the neural clustering loss. One exception: **`find_cluster_correlations`** can add **`sequence_latent_similarity`** edges from **stored latent vectors** (cosine similarity of per-cluster centroid vectors; see §9.5).
 
 ### 9.1 Dataclasses (`security_insights.py`)
 
@@ -604,17 +639,20 @@ This risk score is **independent** of Silhouette or deep model loss; it summariz
 
 ### 9.5 Cluster correlations and attack-chain hints
 
-**`find_cluster_correlations(cluster_profiles, events_by_cluster)`** compares **unordered pairs** of clusters $(a,b)$ using sets of **source** and **destination** IPs from parsed events (not from insights).
+**`find_cluster_correlations(cluster_profiles, events_by_cluster, latent_embeddings=None, cluster_labels=None, latent_similarity_threshold=0.55)`** compares **unordered pairs** of clusters $(a,b)$ using (1) optional **latent centroid cosine similarity** when `latent_embeddings` and `cluster_labels` are provided and row-aligned, then (2) sets of **source** and **destination** IPs from parsed events (not from insights).
 
 Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` values.
 
 | `correlation_type` | Condition | `correlation_strength` | Meaning |
 |--------------------|-----------|-------------------------|---------|
+| **`sequence_latent_similarity`** | L2-normalized **mean latent vector** per cluster; cosine $\ge$ threshold (default **0.55**) | Cosine similarity in $[0,1]$ | **Geometric** hint: cluster prototypes align in embedding space. Uses **any** job’s stored latents (name is historical); not IP overlap. |
 | **`same_source`** | $S_a \cap S_b \neq \emptyset$ | $\|S_a \cap S_b\| / \max(\|S_a\|, \|S_b\|)$, emitted only if **> 0.1** | Shared origin IPs across behavioral groups. |
 | **`same_target`** | $T_a \cap T_b \neq \emptyset$ | $\|T_a \cap T_b\| / \max(\|T_a\|, \|T_b\|)$, only if **> 0.1** | Same victims/services touched from different clusters. |
 | **`attack_chain`** | $S_a \cap T_b \neq \emptyset$ | $\|S_a \cap T_b\| / \|S_a\|$ | **Hypothesis**: actors (sources) in cluster $a$ appear as **targets** in $b$ (e.g. pivot); not proof of temporal ordering. |
 
-**`shared_indicators`**: up to 5 sample IPs from the intersection. **`description`**: human-readable summary.
+**`shared_indicators`**: up to 5 sample IPs from the intersection (IP-based types); empty for **`sequence_latent_similarity`**. **`description`**: human-readable summary.
+
+**API**: `GET /insights/{job_id}` passes training **`latent`** and refined **`labels`** into this helper so latent pairs can appear alongside IP heuristics.
 
 **Operational note**: NAT, scanners, and load balancers create false overlaps; correlate with timestamps and asset inventory before incident declaration.
 
@@ -675,8 +713,10 @@ Let $S_k$ = set of `source_ip` values in cluster $k$, $T_k$ = set of `dest_ip` v
 | `profiles` | `list[ClusterProfile]` |
 | `summary` | Summary dict |
 | `feature_mean`, `feature_std` | Vectors used conceptually for consistent normalization (training batch stats) |
-| `model_type` | String id (`idec`, `dmvc`, …) for display and `/results` |
+| `model_type` | String id (`idec`, `idec_lstm`, `idec_transformer`, `dmvc`, …) for display and `/results` |
 | `training_loss` | Dict: final-epoch `total_loss`, `clustering_loss`, `reconstruction_loss` (nullable for legacy in-memory jobs) |
+| `uses_sequence_model` | `true` when `model_type` is `idec_lstm` or `idec_transformer` |
+| `seq_len` | Window length $T$ copied from `TrainingConfig` (meaningful when `uses_sequence_model`) |
 
 ---
 
@@ -787,7 +827,7 @@ Runs only when `jobId` is set **and** `state === 'training'`.
 
 **Local state**
 
-- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType` (`'dec' \| 'idec' \| 'vade' \| 'contrastive' \| 'ufcm' \| 'dmvc'`), `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `showAdvanced`.
+- `events` (textarea content synced from `preloadedEvents` via `useEffect`), `modelType` (`'dec' \| 'idec' \| 'idec_lstm' \| 'idec_transformer' \| 'vade' \| 'contrastive' \| 'ufcm' \| 'dmvc'`), `nClusters`, `latentDim`, `pretrainEpochs`, `finetuneEpochs`, `seqLen` (advanced; used when model is sequence IDEC), `showAdvanced`.
 
 **Validation**
 
@@ -799,7 +839,7 @@ Builds `TrainingRequest`: fixed `hidden_dims: [256,128,64]`, `batch_size = clamp
 
 **UI**
 
-- Model `Select` (options driven from `MODEL_INFO`, including **UFCM** and **DMVC**), sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section, **Start Training** disabled when `!isValid`.
+- Model `Select` (options driven from `MODEL_INFO`, including **UFCM**, **DMVC**, and **sequence IDEC** variants), sliders for hyperparameters, tooltips (`TooltipProvider`), optional advanced section (**`seq_len`** when a sequence model is selected), **Start Training** disabled when `!isValid`.
 
 ### 12.8 `TrainingProgress` (`frontend/components/training-progress.tsx`)
 

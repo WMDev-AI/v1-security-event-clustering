@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), Variational Deep Embedding (VaDE), contrastive deep clustering, deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM), and **Deep Multi-View Clustering (DMVC)** with a two-view split of the feature vector and DEC-style clustering on a fused latent code. The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
+This document provides a research-grade technical specification for the deep clustering stack implemented in this project. The system addresses unsupervised organization of high-volume security telemetry by coupling (1) learned latent representations, (2) cluster-aware optimization objectives, and (3) post-hoc intrinsic quality maximization under runtime constraints. Supported model families include Deep Embedded Clustering (DEC), Improved DEC (IDEC), **IDEC with temporal sequence encoders (LSTM or Transformer)** over windows of consecutive events, Variational Deep Embedding (VaDE), contrastive deep clustering, deep Unconstrained Fuzzy C-Means (UFCM / UC-FCM), and **Deep Multi-View Clustering (DMVC)** with a two-view split of the feature vector and DEC-style clustering on a fused latent code. The production pipeline extends classical deep clustering with an explicit latent ensemble refinement stage that performs algorithm and cluster-count search to improve partition quality, while preserving operational latency.
 
 ---
 
@@ -68,7 +68,7 @@ Many practical systems still use static features with shallow clustering, then a
 
 Relative to prior lines, this implementation combines:
 
-- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM and dual-encoder multi-view fusion via DMVC),
+- deep latent learning (multiple model families, including fuzzy latent clustering via UFCM, dual-encoder multi-view fusion via DMVC, and **sequence encoders** for IDEC over time-ordered event windows),
 - intrinsic metric-aware selection and monitoring,
 - bounded ensemble refinement after fine-tuning,
 - direct integration with security insight generation.
@@ -156,7 +156,7 @@ Hence, this problem is worth pursuing because it addresses both scientific chall
 
 This implementation contributes the following engineering-research elements:
 
-- Multi-family deep clustering support in one pipeline (DEC/IDEC/VaDE/contrastive/UFCM/DMVC).
+- Multi-family deep clustering support in one pipeline (DEC/IDEC/**IDEC+LSTM**/**IDEC+Transformer**/VaDE/contrastive/UFCM/DMVC).
 - Stage-aware training orchestration and real-time progress reporting, including **per-epoch fine-tune loss decomposition** (`total_loss`, `clustering_loss`, `reconstruction_loss`) exposed through the training-status API and persisted on the results payload.
 - Intrinsic metric computation integrated into both training and result APIs.
 - Post-fine-tuning latent ensemble refinement:
@@ -223,9 +223,9 @@ This data-flow figure describes how raw security telemetry is transformed into a
 - `**D: Normalization**`: standardizes each feature dimension using dataset mean and variance so that distance computations in later steps are stable and comparable.
 - `**E: Deep Representation Learning**`: the encoder part of the selected deep clustering model maps normalized features into a latent embedding space where cluster geometry is more separable.
 - `**F: Cluster Initialization**`: produces initial cluster seeds/assignments (e.g., via GMM/K-means in latent space or model-specific initialization) to prevent degenerate clustering updates.
-- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/VaDE/contrastive/UFCM/DMVC) to refine both latent geometry and soft assignment structure.
+- `**G: Deep Fine-tuning**`: optimizes the clustering-aware objective (DEC/IDEC/sequence-IDEC/VaDE/contrastive/UFCM/DMVC) to refine both latent geometry and soft assignment structure.
 - `**H: Latent Embeddings Z**`: stores the learned embedding vectors $z_i=f_\theta(x_i)$ for all events, which are the basis for final clustering and metrics.
-- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows; for DMVC, argmax over Student-$t$ soft assignments $q$ on the fused latent).
+- `**I: Base Assignments**`: converts model outputs into discrete cluster labels (typically by taking argmax over soft assignment probabilities; for UFCM, argmax over fuzzy membership rows; for DMVC, argmax over Student-$t$ soft assignments $q$ on the fused latent; for **IDEC+LSTM/Transformer**, argmax over $q$ on the latent of the **sequence** encoder).
 - `**J: Latent Ensemble Refinement**`: performs a bounded search over alternative latent partitions (algorithm choice, cluster-count candidates, and projection variants) to improve intrinsic quality.
 - `**K: Final Labels**`: selects the refined labels and treats them as the canonical clustering result for downstream profiling.
 - `**L: Intrinsic Metrics**`: computes Silhouette, Davies–Bouldin, and Calinski–Harabasz from the same latent representation used for clustering, enabling consistent quality reporting.
@@ -254,7 +254,7 @@ Runtime components (Figure 4.2 — text form for standard Markdown preview):
        │    ▼                ▼                ▼
        │ Event parser   DeepClusteringTrainer   Cluster analyzer
        │                    │  │                 Security insights engine
-       │                    │  ├─► Model family (DEC / IDEC / VaDE / Contrastive / UFCM / DMVC)
+       │                    │  ├─► Model family (DEC / IDEC / IDEC+LSTM / IDEC+Transformer / VaDE / Contrastive / UFCM / DMVC)
        │                    │  └─► Latent refinement engine
        │                    │
        └────────────────────┴── results / metrics / insights
@@ -268,7 +268,7 @@ This runtime component view explains where each transformation is executed and h
 - `**API: FastAPI Service**`: exposes HTTP endpoints (train, status, results, cluster events, insights) and coordinates background training so the UI thread stays responsive.
 - `**PARSER: Event Parser**`: reused by the API to parse raw strings into structured events and then to produce normalized feature matrices for training.
 - `**TRAINER: DeepClusteringTrainer**`: encapsulates model training logic, including pretraining, initialization, fine-tuning, and inference of latent embeddings and soft assignments.
-- `**MODELS: DEC / IDEC / VaDE / Contrastive / UFCM / DMVC**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM and dual-view fusion for DMVC).
+- `**MODELS: DEC / IDEC / sequence-IDEC / VaDE / Contrastive / UFCM / DMVC**`: selects the deep clustering objective family; it defines how embeddings are shaped and how assignments are represented (including fuzzy memberships for UFCM, dual-view fusion for DMVC, and **LSTM/Transformer over $[T,d]$ windows** for sequence IDEC).
 - `**REFINE: Latent Refinement Engine**`: post-processes model output using intrinsic metrics by exploring candidate partitions under time and validity constraints.
 - `**ANALYZER: Cluster Analyzer**`: consumes refined labels and events to compute cluster-level profiles (representative events, top entities, severity distributions, etc.).
 - `**INSIGHTS: Security Insights Engine**`: maps cluster profiles into higher-level intelligence (risk assessment, attack pattern hints, and correlations).
@@ -309,6 +309,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 - **Aim**: Build an initial **representation manifold** where neighborhood structure reflects security-relevant similarity **before** the model is pushed toward discrete cluster structure. This reduces the risk of trivial solutions (e.g., collapsed latents or assignments driven only by noise) when clustering objectives turn on in fine-tuning.
 - **Mechanism (by family)**:
   - **DEC / IDEC / VaDE / UFCM (backbone path)**: optimize **reconstruction** (mean squared error between $x$ and decoder output) or, for VaDE, a **VAE-style ELBO** so the encoder learns a smooth latent space; UFCM uses the same autoencoder body but does not yet apply fuzzy cluster pressure.
+  - **IDEC + LSTM / IDEC + Transformer**: optimize reconstruction of the **current** (last-in-window) event vector $\hat{x}_t$ from a latent $z_t$ produced by encoding the tensor $[x_{t-T+1},\ldots,x_t]$ (see §6.7); clustering pressure is applied only after this pretraining phase, as for standard IDEC.
   - **DMVC**: train **two** autoencoders on the **first** and **second half** of each feature vector, minimizing the **sum** of per-view reconstruction errors so each view has a viable encoder–decoder before fusion and clustering.
   - **Contrastive**: optimize **invariance** across light augmentations (e.g., dropout-style views) so the encoder maps perturbed versions of the same event to similar representations—useful when raw logs are noisy or inconsistently tokenized.
 - **Outputs**: Updated weights for encoders/decoders (and related heads), recorded **pretrain loss** per epoch on the job status channel, and `history['pretrain_loss']` in the trainer.
@@ -318,7 +319,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 
 - **Aim**: Provide **initial cluster hypotheses** (centroids, mixture parameters, or cluster-layer weights) so fine-tuning starts from a partition that already separates coarse behavior modes. Deep clustering objectives are **non-convex** and **initialization-sensitive**; random or trivial seeds often yield poor local minima (merged clusters, empty clusters, or latents that ignore structure).
 - **Mechanism (by family)**:
-  - **DEC / IDEC / DMVC / UFCM**: encode the full dataset (or fused latent for DMVC), run **K-means** (or equivalent) in latent space, and copy centroids into the model’s cluster parameters (`ClusteringLayer` centers or UFCM’s `cluster_centers`).
+  - **DEC / IDEC / DMVC / UFCM / IDEC+LSTM / IDEC+Transformer**: encode the full dataset (or fused latent for DMVC; or **sequence batches** $X\in\mathbb{R}^{N\times T\times d}$ for sequence IDEC), run **K-means** (or equivalent) in latent space, and copy centroids into the model’s cluster parameters (`ClusteringLayer` centers or UFCM’s `cluster_centers`).
   - **VaDE**: **GMM-style** initialization in latent space (means, variances, mixture weights) aligned with the generative head.
   - **Contrastive**: latent **K-means** with optional multi-restart selection when configured, sometimes with progress reporting for long corpora.
 - **Outputs**: Initialized cluster centers (or mixture parameters), optional logging of initial label histograms, and flags so fine-tuning can assume clusters are **anchored** in $z$-space.
@@ -327,7 +328,7 @@ Stage transitions make the end-to-end compute schedule explicit. This is especia
 #### `fine_tuning` — joint representation and clustering objective
 
 - **Aim**: **Jointly** refine embeddings and **soft** cluster structure so that events the analyst would group together sit coherently in latent space **and** under the model’s assignment mechanism. This is where family-specific objectives (KL targets for DEC/IDEC/DMVC, ELBO + mixture for VaDE, contrastive + consistency, fuzzy distortion + recon for UFCM) dominate the loss.
-- **Mechanism**: Stochastic optimization over mini-batches with family-specific forward passes and losses. For DEC/IDEC/DMVC, a **target distribution** over soft assignments is recomputed on a fixed interval and used in a **KL** term; IDEC and DMVC add **reconstruction**; DMVC adds **cross-view latent alignment**. The trainer evaluates **intrinsic metrics** (Silhouette, DBI, CH) on a coarser schedule and can stop early if **assignment drift** between checkpoints falls below a tolerance. **Observability**: every epoch the service exposes **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` on the training job payload; intrinsic metrics are merged every fifth epoch and the last snapshot is carried between those evaluations so polling UIs stay informative. After training, the **final epoch** values of the three loss scalars are stored on the completed job and returned under **`training_loss`** on **`/results`** alongside recomputed intrinsic metrics on refined labels.
+- **Mechanism**: Stochastic optimization over mini-batches with family-specific forward passes and losses. For DEC/IDEC/DMVC and **sequence IDEC**, a **target distribution** over soft assignments is recomputed on a fixed interval and used in a **KL** term; IDEC (vector and sequence) and DMVC add **reconstruction** (for sequence IDEC, MSE compares the decoder output to **$x_t$** only—the last row of each window); DMVC adds **cross-view latent alignment**. The trainer evaluates **intrinsic metrics** (Silhouette, DBI, CH) on a coarser schedule and can stop early if **assignment drift** between checkpoints falls below a tolerance. **Observability**: every epoch the service exposes **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` on the training job payload; intrinsic metrics are merged every fifth epoch and the last snapshot is carried between those evaluations so polling UIs stay informative. After training, the **final epoch** values of the three loss scalars are stored on the completed job and returned under **`training_loss`** on **`/results`** alongside recomputed intrinsic metrics on refined labels.
 - **Outputs**: Converged (or early-stopped) model weights, `history` time series of losses and periodic metrics, and **base** hard labels from `argmax` of the model’s soft outputs (before optional postprocessing refinement).
 - **Typical failures**: Loss plateaus with poor metrics (objective–metric mismatch), cluster collapse, or instability from aggressive learning rates; may require more pretraining, different $K$, or another model family.
 
@@ -725,9 +726,45 @@ The HTTP **job status** and **`/results`** payload surface these three names for
 - **IDEC/DEC**: DMVC **shares** the same KL + target-distribution mechanism on $z$; it **adds** explicit two-branch encoders and view consistency.
 - **UFCM**: different assignment geometry (fuzzy memberships vs. Student-$t$); DMVC does **not** expose fuzzy memberships.
 
-## 6.7 Model Selection Guidance (Beginner-Friendly)
+## 6.7 Improved DEC on temporal windows — LSTM and Transformer sequence encoders (IDEC only)
+
+This section documents **sequence-based IDEC**, implemented in **`backend/sequence_clustering.py`** and **`backend/sequence_featurization.py`**, and selected in training as **`idec_lstm`** or **`idec_transformer`** (`ModelType.IDEC_LSTM`, `IDEC_TRANSFORMER` in **`backend/trainer.py`**). **DEC, VaDE, contrastive, UFCM, and DMVC remain on the flat $d$-dimensional vector path**; only **IDEC** has LSTM/Transformer variants in the current codebase.
+
+**Motivation.** Security telemetry is naturally **ordered in time**. A single event’s feature vector may be ambiguous; a short **window** of consecutive events can carry richer context (bursts, sequences of actions, evolving sessions). Sequence IDEC encodes each window into a latent $z_t\in\mathbb{R}^{m_{\mathrm{latent}}}$, then applies the same **Student-$t$ clustering distribution** and **KL-to-target** fine-tuning pattern as vector IDEC (§6.2).
+
+**Window construction (`build_temporal_sequences`).** After parsing and featurization, events are sorted by timestamp. For each index $t$ (in sorted order), a window of length $T=\texttt{seq\_len}$ is formed:
+
+$$
+X_t = [\,x_{t-T+1},\,x_{t-T+2},\,\ldots,\,x_t\,] \in \mathbb{R}^{T\times d},
+$$
+
+padding the **earliest** positions with repeats of $x_0$ when $t<T-1$ so every row is a valid $d$-vector. Training tensors are shaped $[N_{\mathrm{seq}},T,d]$.
+
+**Architecture (`SecurityEventSequenceAutoEncoder`).**
+
+- **Encoder**: either **LSTM** (stacked, hidden size `seq_hidden`, `lstm_layers`) or **Transformer** (optional learned positional embeddings, `transformer_layers` blocks, `transformer_heads`, `seq_hidden` as model width). The **last time step** hidden state is projected to $z_t$ (latent dimension $m_{\mathrm{latent}}$).
+- **Decoder**: an MLP maps $z_t$ back to $\mathbb{R}^d$. The **reconstruction target** is **only the last frame** $x_t$ (current event), not the full window—so the model must compress temporal context into $z_t$ to predict the present observation.
+
+**Clustering head.** `DeepEmbeddedClusteringSequence` applies the same Student-$t$ kernel as IDEC (Eq. (6.2)) to $z_t$, producing $q_{ij}$. `ImprovedDECSequence` combines **clustering loss** (KL to target $p$) and **reconstruction loss** on $x_t$ with weight `gamma`, analogously to `ImprovedDEC` for vectors.
+
+**Training vs inference.**
+
+- **Training / analyze**: windows are built from the **time-ordered** training set so each sequence row aligns with a real predecessor chain.
+- **Predict** (single events or unsorted batches): **`expand_rows_to_sequences`** repeats the **same** feature vector across $T$ rows when no history is available, so the model still receives $[B,T,d]$; this is a **neutral** prior (no temporal differentiation) rather than fabricated chronology.
+
+**Hyperparameters (API / `TrainingConfig`).** `seq_len` ($T$), `seq_hidden`, `lstm_layers`, `transformer_heads`, `transformer_layers`; other IDEC knobs (`gamma`, pretrain/finetune epochs, $m_{\mathrm{latent}}$, $K$) apply as for vector IDEC.
+
+**Operational note.** Larger $T$ increases memory and compute; very long windows may dilute local behavior unless the corpus has consistent inter-event timing. Compare **IDEC (vector)** vs **IDEC+LSTM/Transformer** with the same $K$ and refinement budget when evaluating whether temporal context helps your deployment.
+
+### Relation to other families
+
+- **Vector IDEC (§6.2)**: same clustering and target-distribution mechanics; sequence IDEC replaces the MLP encoder with **LSTM/Transformer over $[T,d]$** and reconstructs **$x_t$** only.
+- **DMVC / UFCM**: no sequence path; they address **multi-view** and **fuzzy** geometry on **per-event** vectors, respectively.
+
+## 6.8 Model Selection Guidance (Beginner-Friendly)
 
 - **IDEC (recommended default)**: best first choice when you want balanced quality, stability, and interpretability.
+- **IDEC + LSTM / IDEC + Transformer**: use when events are **time-ordered** and **short temporal context** may disambiguate behaviors; same interpretability story as IDEC after labels exist (§6.7).
 - **DEC**: use when you need a simpler/faster cluster-focused baseline.
 - **VaDE**: use when probabilistic membership and uncertainty are important to your analysis.
 - **Contrastive**: use when data noise is high and invariance learning is a priority.
@@ -737,11 +774,12 @@ The HTTP **job status** and **`/results`** payload surface these three names for
 A practical workflow is:
 
 1. start with IDEC,
-2. compare against DEC as a simpler baseline,
-3. try VaDE if ambiguity/uncertainty modeling is needed,
-4. try contrastive models when input noise or variability is severe,
-5. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question,
-6. try DMVC when a **two-view feature layout** is plausible and you want explicit cross-view latent agreement.
+2. if timestamps are trustworthy and sessions matter, try **IDEC+LSTM** or **IDEC+Transformer** (vary `seq_len`),
+3. compare against DEC as a simpler baseline,
+4. try VaDE if ambiguity/uncertainty modeling is needed,
+5. try contrastive models when input noise or variability is severe,
+6. try UFCM when soft assignments or overlapping behavioral regimes are central to the analytic question,
+7. try DMVC when a **two-view feature layout** is plausible and you want explicit cross-view latent agreement.
 
 ---
 
@@ -756,7 +794,7 @@ This training strategy is designed to balance three goals that often conflict in
 2. **Initialization**: estimate cluster seeds in latent space.
   Cluster-aware methods are strongly initialization-dependent; this stage computes initial assignments/centers (e.g., K-means/GMM/model-specific initialization) so fine-tuning starts from a plausible partition.
 3. **Fine-tuning**: optimize clustering-aware objective.
-  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/VaDE/contrastive/UFCM/DMVC), while periodic metrics monitor whether separation improves or degrades. The trainer logs **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **each epoch** for API/UI consumption (see §7.3 implementation note).
+  The model updates latent geometry and assignments jointly using the selected family objective (DEC/IDEC/**sequence-IDEC**/VaDE/contrastive/UFCM/DMVC), while periodic metrics monitor whether separation improves or degrades. The trainer logs **batch-averaged** `total_loss`, `clustering_loss`, and `reconstruction_loss` **each epoch** for API/UI consumption (see §7.3 implementation note).
 4. **Postprocessing**: bounded latent ensemble refinement with constraints.
   After model optimization, discrete labels are refined via constrained search in latent space (algorithm and $K$ variants) to recover better intrinsic partitions without retraining encoder weights.
 
@@ -768,7 +806,7 @@ This decomposition improves controllability: each stage answers a different ques
 Sequence workflow (Figure 7.2 — text form for standard Markdown preview):
 
   1. User/API ──► Parser: upload and parse events
-  2. Parser ──► Trainer: normalized matrix X
+  2. Parser ──► Trainer: normalized matrix X (or [N,T,d] windows for sequence IDEC)
   3. Trainer: pretrain encoder → initialize centers/distribution → fine-tune objective
   4. Trainer ──► Refinement: latent Z and initial labels y0
   5. Refinement: bounded ensemble search ──► refined labels y*
@@ -781,7 +819,7 @@ Sequence workflow (Figure 7.2 — text form for standard Markdown preview):
 The sequence workflow can be interpreted as a contract between data handling, model optimization, and analyst-facing outputs:
 
 - `**U -> P: Upload and parse events**`: the user submits raw events; parser validation occurs before expensive training is allowed.
-- `**P -> T: Normalized matrix X**`: trainer receives a fixed-dimensional, normalized matrix to ensure optimization stability.
+- `**P -> T: Normalized matrix X**`: trainer receives fixed-dimensional, **normalized** inputs—either per-event vectors $X\in\mathbb{R}^{N\times d}$ or, for **IDEC+LSTM/Transformer**, time-ordered windows $X\in\mathbb{R}^{N\times T\times d}$ built after the same per-event normalization (§6.7).
 - `**T -> T: Pretrain encoder**`: latent manifold is shaped with structure-preserving objectives.
 - `**T -> T: Initialize centers/distribution**`: initial cluster hypotheses are estimated in latent space.
 - `**T -> T: Fine-tune deep objective**`: clustering-aware optimization refines both representation and assignment structure.
@@ -1088,8 +1126,8 @@ Cluster outputs are mapped to analyst-facing intelligence. The following items a
   - *What to do:* **Map each action to an owner** (SOC, IR, platform engineering); **convert** into change tickets with scope and rollback; **avoid blind automation**—tune rules to your environment; **measure** whether post-change log volume or risk scores improve on the next training run.
 
 - **IOC and correlation extraction**  
-  - *What:* **IOCs** are observable indicators (e.g. IP addresses with context strings, suspicious users, attack-pattern summaries) suitable for block lists, hunts, or threat-intel sharing; **correlations** link pairs of clusters when they share sources, share targets, or satisfy a simple **attack-chain** overlap rule (sources in one cluster appear as targets in another).  
-  - *How:* IOCs are gathered from **`ioc_indicators`** on insights and aggregated in the IOC endpoint (deduplicated contexts, severity roll-up, optional firewall-rule suggestions). Correlations are computed by set overlap on **source** and **destination** IP sets between cluster event groups, with numeric **strength** thresholds to suppress noise.  
+  - *What:* **IOCs** are observable indicators (e.g. IP addresses with context strings, suspicious users, attack-pattern summaries) suitable for block lists, hunts, or threat-intel sharing; **correlations** link pairs of clusters when they share sources, share targets, satisfy a simple **attack-chain** overlap rule (sources in one cluster appear as targets in another), or exhibit **high cosine similarity between cluster centroids in latent space** (`sequence_latent_similarity`).  
+  - *How:* IOCs are gathered from **`ioc_indicators`** on insights and aggregated in the IOC endpoint (deduplicated contexts, severity roll-up, optional firewall-rule suggestions). Correlations combine set overlap on **source** and **destination** IP sets between cluster event groups (with numeric **strength** thresholds to suppress noise) and optional **latent centroid** comparisons when embeddings are available (§11.3).  
   - *What to do:* For IOCs, **verify provenance** (which insight and samples), **age out** stale indicators using `generated_at` and retraining, and **feed** only vetted IPs into enforcement tiers. For correlations, **treat as hypotheses**: validate with timestamps and identity data; use **shared-source** links for actor-centric cases and **attack-chain** links for possible lateral movement—then **document** disproven links to improve future heuristics.
 
 This conversion from unsupervised clusters to actionable security semantics is central for SOC integration.
@@ -1174,7 +1212,7 @@ The returned object includes `score`, `level`, `factors`, and `event_count` so a
 
 ### 11.3 Cluster correlations and attack chains
 
-After clustering, the engine compares **pairs of clusters** using only **network identity overlap** on parsed `source_ip` and `dest_ip` fields (`find_cluster_correlations`).
+After clustering, the engine compares **pairs of clusters** with (1) **network identity overlap** on parsed `source_ip` and `dest_ip` fields and (2) optional **latent centroid similarity** when the API passes stored embeddings and refined labels into `find_cluster_correlations` (`security_insights.py`).
 
 **Same-source correlation.** Let $S_a$, $S_b$ be the sets of source IPs in clusters $a$ and $b$. If $S_a \cap S_b \neq \emptyset$, define
 
@@ -1194,7 +1232,9 @@ $H_{ac} = S_a \cap T_b$.
 
 If non-empty, strength is reported as $|H_{ac}| / |S_a|$ (fraction of $a$’s sources that are “pivots” into $b$’s target set). The description states that sources in cluster $a$ are targets in cluster $b$, suggesting a possible **lateral movement or multi-stage** narrative. This is a **weak structural signal**: it does not prove temporal ordering or causality; analysts should validate with timestamps and authentication context.
 
-**Evaluation guidance.** Treat correlations as **hypotheses for investigation**: sort by `correlation_strength`, cross-check shared IPs against asset inventory, and reject spurious overlaps (NAT pools, load balancers, scanners hitting many clusters).
+**Latent centroid similarity (`sequence_latent_similarity`).** When `latent_embeddings` (per-event matrix $Z$) and `cluster_labels` align in length, the engine computes **L2-normalized** mean latent vectors (centroids) per cluster and, for each unordered pair $(a,b)$, the **cosine similarity** of those centroids. If similarity $\ge$ a configurable threshold (default $0.55$), it emits `correlation_type="sequence_latent_similarity"` with `correlation_strength` equal to that cosine. Despite the name, this uses **whatever** latent vectors the job stored (vector IDEC, sequence IDEC, DMVC, etc.); it highlights **geometrically similar** cluster prototypes in embedding space, not IP overlap.
+
+**Evaluation guidance.** Treat correlations as **hypotheses for investigation**: sort by `correlation_strength`, cross-check shared IPs against asset inventory, and reject spurious overlaps (NAT pools, load balancers, scanners hitting many clusters). For latent pairs, confirm with cluster profiles and samples before merging narratives—high centroid similarity can still reflect benign structure shared across clusters.
 
 ### 11.4 Evaluating indicators of compromise (IOCs)
 
@@ -1234,7 +1274,7 @@ For stronger reproducibility, also record:
 
 ### 12.2 Core Experiments
 
-1. **Model family comparison**: DEC vs IDEC vs VaDE vs contrastive vs UFCM vs DMVC.
+1. **Model family comparison**: DEC vs IDEC vs **IDEC+LSTM** vs **IDEC+Transformer** vs VaDE vs contrastive vs UFCM vs DMVC.
 2. **Latent dimension sweep**: impact of $m$ on separability.
 3. **Cluster count sensitivity**: fixed $K$ vs adaptive search.
 4. **Refinement ablation**:
@@ -1274,7 +1314,7 @@ This section gives **illustrative** experimental summaries that match the evalua
 ### 13.1 Setup (aligned with the codebase)
 
 - **Input**: $N \approx 10^4$–$10^5$ parsed key=value events; per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
-- **Models**: DEC, IDEC, VaDE, contrastive, UFCM, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
+- **Models**: DEC, IDEC, **IDEC+LSTM**, **IDEC+Transformer**, VaDE, contrastive, UFCM, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. For sequence IDEC, record **`seq_len`** (and LSTM/Transformer width-depth knobs) alongside the above. (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
 - **Refinement**: latent ensemble search with time budget $T_{\max}\approx 8\,\mathrm{s}$, sampled Silhouette for scoring (Section 9).
 - **Metrics**: Silhouette ($S$, higher better), Davies–Bouldin ($\mathrm{DBI}$, lower better), Calinski–Harabasz ($\mathrm{CH}$, higher better), all computed in **latent space** on final assignments unless stated otherwise.
 
@@ -1301,9 +1341,11 @@ Values are rounded to two decimals; CH scaled for readability. DBI and CH are on
 | VaDE | 0.11 | 2.2 | 6.4 |
 | UFCM | 0.10 | 2.2 | 6.5 |
 | DMVC | 0.10 | 2.2 | 6.4 |
+| IDEC + LSTM | 0.11 | 2.2 | 6.6 |
+| IDEC + Transformer | 0.11 | 2.1 | 6.7 |
 | Contrastive | 0.09 | 2.4 | 5.9 |
 
-IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. DMVC’s relative position depends strongly on whether the **feature half-split** matches meaningful structure; the table entry is **illustrative** only. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
+IDEC often balances clustering loss and reconstruction, yielding slightly better intrinsic scores on mixed security-style logs in this illustrative setting. **Sequence IDEC** rows are **illustrative**: outcomes depend on timestamp quality, burst structure, and `seq_len`; they are not guaranteed to beat vector IDEC on every corpus. DMVC’s relative position depends strongly on whether the **feature half-split** matches meaningful structure; the table entry is **illustrative** only. UFCM can sit near DEC/VaDE on hard-label intrinsic metrics because argmax labels do not fully reflect fuzzy overlap; soft-assignment diagnostics (e.g., membership entropy) are complementary.
 
 ### 13.4 Table 3 — Ablations: encoder and refinement
 
@@ -1421,7 +1463,7 @@ Potential research and engineering extensions:
 
 - self-supervised pretraining with richer augmentations,
 - graph-based event correlation embeddings,
-- temporal deep clustering with sequence encoders,
+- extending **sequence encoders** beyond IDEC (e.g. UFCM/DMVC on $[T,d]$ tensors) and richer positional or gap-aware models,
 - online/incremental clustering for streaming SOC workflows,
 - stability-based automatic $K$ selection,
 - analyst feedback loops for weak supervision.
@@ -1440,7 +1482,7 @@ Further high-impact directions include:
 This system implements a production-aware deep clustering framework for security event intelligence, integrating:
 
 - representation learning,
-- cluster-aware optimization across DEC, IDEC, VaDE, contrastive, UFCM, and DMVC families,
+- cluster-aware optimization across DEC, IDEC, **sequence IDEC (LSTM/Transformer)**, VaDE, contrastive, UFCM, and DMVC families,
 - intrinsic metric evaluation,
 - bounded latent ensemble refinement,
 - and threat-centric interpretation.
