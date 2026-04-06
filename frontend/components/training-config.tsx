@@ -76,17 +76,34 @@ const MODEL_INFO = {
       'Splits the feature vector into two views (first and second half), trains a separate autoencoder per view, fuses latents for clustering with the same Student-t / KL objective as DEC/IDEC, and aligns view latents with an MSE consistency term.',
     pros: ['Multi-view structure', 'Reconstruction + clustering'],
     best_for: 'When natural feature groups exist (e.g. early vs late dimensions) or you want explicit cross-view agreement'
+  },
+  idec_lstm: {
+    name: 'IDEC + LSTM (temporal windows)',
+    description:
+      'Improved DEC where each sample is a time-ordered window of consecutive events (sorted by timestamp). An LSTM encodes the window into a latent vector; clustering and reconstruction target the current (last) event in the window.',
+    pros: ['Temporal context', 'Same IDEC objective as the MLP baseline'],
+    best_for: 'Logs with trustworthy timestamps when recent context should influence grouping'
+  },
+  idec_transformer: {
+    name: 'IDEC + Transformer (temporal windows)',
+    description:
+      'Same temporal windowing as LSTM IDEC, but uses a Transformer encoder with positional encoding over the window, then mean-pools to a latent for Student-t clustering and reconstruction.',
+    pros: ['Long-range attention within the window', 'Parallelizable encoder'],
+    best_for: 'When you want attention over the last T events instead of recurrent pooling'
   }
 }
 
 export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEvents, preloadedFilename }: TrainingConfigProps) {
   const [events, setEvents] = useState<string>(preloadedEvents?.join('\n') || '')
-  const [modelType, setModelType] = useState<'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm' | 'dmvc'>('idec')
+  type ModelChoice = keyof typeof MODEL_INFO
+  const [modelType, setModelType] = useState<ModelChoice>('idec')
   const [nClusters, setNClusters] = useState(10)
   const [latentDim, setLatentDim] = useState(32)
   const [pretrainEpochs, setPretrainEpochs] = useState(30)
   const [finetuneEpochs, setFinetuneEpochs] = useState(50)
+  const [seqLen, setSeqLen] = useState(16)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const usesSequenceModel = modelType === 'idec_lstm' || modelType === 'idec_transformer'
   
   // Update events when preloaded events change
   useEffect(() => {
@@ -109,7 +126,8 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
       pretrain_epochs: pretrainEpochs,
       finetune_epochs: finetuneEpochs,
       batch_size: Math.min(256, Math.max(32, Math.floor(eventCount / 10))),
-      learning_rate: 0.001
+      learning_rate: 0.001,
+      ...(usesSequenceModel ? { seq_len: seqLen } : {}),
     }
     onSubmit(config)
   }
@@ -184,7 +202,7 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Select value={modelType} onValueChange={(v) => setModelType(v as typeof modelType)}>
+            <Select value={modelType} onValueChange={(v) => setModelType(v as ModelChoice)}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -336,6 +354,34 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
                   step={10}
                 />
               </div>
+
+              {usesSequenceModel && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="flex items-center gap-1.5">
+                      Sequence window (events)
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-[220px] text-xs">
+                            Number of consecutive time-ordered events per training sample. Larger windows add context but increase memory and noise risk.
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </Label>
+                    <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{seqLen}</span>
+                  </div>
+                  <Slider
+                    value={[seqLen]}
+                    onValueChange={([v]) => setSeqLen(v)}
+                    min={4}
+                    max={64}
+                    step={1}
+                  />
+                </div>
+              )}
             </CardContent>
           )}
         </Card>

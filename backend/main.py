@@ -26,6 +26,27 @@ from deep_clustering import (
     ContrastiveDeepClustering,
 )
 from trainer import DeepClusteringTrainer, TrainingConfig, ModelType, ClusteringMetrics
+
+
+def _training_feature_matrix(
+    features: np.ndarray,
+    events: list,
+    model_type: ModelType,
+    config: TrainingConfig,
+) -> np.ndarray:
+    if model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
+        from sequence_featurization import build_temporal_sequences
+
+        return build_temporal_sequences(features, events, config.seq_len)
+    return features
+
+
+def _inference_feature_matrix(features: np.ndarray, trainer: DeepClusteringTrainer) -> np.ndarray:
+    if trainer._uses_sequence_encoder():
+        from sequence_featurization import expand_rows_to_sequences
+
+        return expand_rows_to_sequences(features, trainer.config.seq_len)
+    return features
 from cluster_analyzer import ClusterAnalyzer, analyze_clusters_from_results, ClusterProfile
 from security_insights import SecurityInsightsEngine, SecurityInsight, ClusterCorrelation
 from event_table_query import (
@@ -76,6 +97,8 @@ class ModelTypeEnum(str, Enum):
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
     DMVC = "dmvc"
+    IDEC_LSTM = "idec_lstm"
+    IDEC_TRANSFORMER = "idec_transformer"
 
 
 class TrainingRequest(BaseModel):
@@ -88,6 +111,12 @@ class TrainingRequest(BaseModel):
     finetune_epochs: int = Field(default=50, ge=10, le=300, description="Fine-tuning epochs")
     batch_size: int = Field(default=128, ge=16, le=1024, description="Batch size")
     learning_rate: float = Field(default=1e-3, gt=0, le=0.1, description="Learning rate")
+    seq_len: int = Field(
+        default=16,
+        ge=2,
+        le=256,
+        description="Temporal window length for idec_lstm / idec_transformer (ignored for other models)",
+    )
 
 
 class PredictRequest(BaseModel):
@@ -173,7 +202,8 @@ async def run_training(
             training_jobs[job_id]["status"] = "failed"
             training_jobs[job_id]["message"] = f"Error parsing events: {str(e)}"
             return
-        
+
+        train_matrix = _training_feature_matrix(features, events, model_type, config)
 
         training_jobs[job_id]["n_events"] = len(events)
         training_jobs[job_id]["status"] = "training"
@@ -204,7 +234,7 @@ async def run_training(
             training_jobs[job_id]["progress"] = progress_pct * 50  # Pretraining is ~50% of total
             await asyncio.sleep(0.05)  # yield control after each epoch
         
-        await trainer.pretrain(features, pretrain_callback)
+        await trainer.pretrain(train_matrix, pretrain_callback)
         training_jobs[job_id]["stages_completed"].append("pretraining")
         
         # Initialize clusters
@@ -222,7 +252,7 @@ async def run_training(
             training_jobs[job_id]["progress"] = 50 + (progress_pct * 0.5)
             await asyncio.sleep(0.05)  # yield control during initialization
         
-        await trainer.initialize_clusters(features, progress_callback=init_callback)
+        await trainer.initialize_clusters(train_matrix, progress_callback=init_callback)
         
         training_jobs[job_id]["stages_completed"].append("initialization")
         training_jobs[job_id]["stage_progress"] = 100
@@ -248,7 +278,7 @@ async def run_training(
             training_jobs[job_id]["progress"] = 50 + (progress_pct * 50)  # Fine-tuning is the other ~50%
             await asyncio.sleep(0.05)  # yield control after each epoch
         
-        await trainer.finetune(features, progress_callback=finetune_callback)
+        await trainer.finetune(train_matrix, progress_callback=finetune_callback)
         training_jobs[job_id]["stages_completed"].append("fine-tuning")
 
         finetune_loss = None
@@ -276,14 +306,14 @@ async def run_training(
             await asyncio.sleep(0.05)
 
         # Get final results
-        labels = trainer.predict(features)
-        latent = trainer.get_latent_representations(features)
+        labels = trainer.predict(train_matrix)
+        latent = trainer.get_latent_representations(train_matrix)
         labels, refinement_info = await trainer.refine_cluster_assignments(
             latent,
             labels,
             progress_callback=refine_progress_callback
         )
-        probs = trainer.get_cluster_probabilities(features)
+        probs = trainer.get_cluster_probabilities(train_matrix)
         
         # Analyze clusters
         profiles, summary = analyze_clusters_from_results(events, labels, latent)
@@ -303,6 +333,9 @@ async def run_training(
             "feature_std": features.std(axis=0) + 1e-8,
             "model_type": training_jobs[job_id].get("model_type"),
             "training_loss": finetune_loss,
+            "uses_sequence_model": model_type
+            in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER),
+            "seq_len": config.seq_len,
         }
         
         training_jobs[job_id]["status"] = "completed"
@@ -371,7 +404,17 @@ async def list_models():
                 "id": "dmvc",
                 "name": "Deep Multi-View Clustering (DMVC)",
                 "description": "Two view-specific autoencoders (first/second half of features), fused latent with DEC-style KL clustering plus reconstruction and cross-view latent alignment"
-            }
+            },
+            {
+                "id": "idec_lstm",
+                "name": "IDEC with LSTM sequence encoder",
+                "description": "Improved DEC with an LSTM over temporal windows of consecutive events (time-sorted); latent clustering + reconstruction of the current event vector"
+            },
+            {
+                "id": "idec_transformer",
+                "name": "IDEC with Transformer sequence encoder",
+                "description": "Improved DEC with a Transformer encoder over temporal event windows; same IDEC objective with sequence context"
+            },
         ]
     }
 
@@ -402,7 +445,8 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
         pretrain_batch_size=request.batch_size,
         finetune_batch_size=request.batch_size,
         pretrain_lr=request.learning_rate,
-        finetune_lr=request.learning_rate / 10
+        finetune_lr=request.learning_rate / 10,
+        seq_len=request.seq_len,
     )
     
     # Create job - store raw events, parsing happens in background
@@ -533,6 +577,7 @@ async def predict_clusters(request: PredictRequest):
     
     # Parse and normalize new events
     events, features = parse_events_to_features(request.events)
+    features = _inference_feature_matrix(features, trainer)
     
     # Predict
     labels = trainer.predict(features)
@@ -722,6 +767,7 @@ async def analyze_events(request: AnalyzeRequest):
     
     # Parse and predict
     events, features = parse_events_to_features(request.events)
+    features = _inference_feature_matrix(features, trainer)
     labels = trainer.predict(features)
     
     # Analyze new events
@@ -1050,10 +1096,12 @@ async def get_security_insights(job_id: str):
         )
         all_insights.extend(insights)
     
-    # Find cluster correlations
+    # Find cluster correlations (IOC overlap + sequence/deep latent centroid similarity)
     correlations = insights_engine.find_cluster_correlations(
         model_data.get("profiles", []),
-        events_by_cluster
+        events_by_cluster,
+        latent_embeddings=latent,
+        cluster_labels=labels,
     )
     
     # Generate executive summary

@@ -37,6 +37,7 @@ from deep_clustering import (
     vae_loss,
     cluster_assignment_entropy
 )
+from sequence_clustering import ImprovedDECSequence
 
 
 class ModelType(str, Enum):
@@ -46,6 +47,8 @@ class ModelType(str, Enum):
     CONTRASTIVE = "contrastive"
     UFCM = "ufcm"
     DMVC = "dmvc"
+    IDEC_LSTM = "idec_lstm"
+    IDEC_TRANSFORMER = "idec_transformer"
 
 
 @dataclass
@@ -83,6 +86,13 @@ class TrainingConfig:
     # UFCM (Unconstrained Fuzzy C-Means on latent space)
     fuzziness_m: float = 2.0  # FCM fuzzifier, must be > 1
     ufcm_recon_weight: float = 0.1  # Reconstruction regularizer (like IDEC)
+
+    # Sequence IDEC (LSTM / Transformer over temporal windows [T, D])
+    seq_len: int = 16
+    seq_hidden: int = 128
+    lstm_layers: int = 2
+    transformer_heads: int = 4
+    transformer_layers: int = 2
     
     # General
     weight_decay: float = 1e-5
@@ -168,6 +178,9 @@ class DeepClusteringTrainer:
         
         self.is_pretrained = False
         self.is_clusters_initialized = False
+
+    def _uses_sequence_encoder(self) -> bool:
+        return self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER)
     
     def _create_model(self) -> nn.Module:
         """Create model based on type"""
@@ -224,6 +237,36 @@ class DeepClusteringTrainer:
                 latent_dim=self.config.latent_dim,
                 alpha=self.config.alpha,
                 dropout=self.config.dropout,
+            )
+        elif self.model_type == ModelType.IDEC_LSTM:
+            return ImprovedDECSequence(
+                input_dim=self.input_dim,
+                seq_len=self.config.seq_len,
+                n_clusters=self.config.n_clusters,
+                seq_hidden=self.config.seq_hidden,
+                latent_dim=self.config.latent_dim,
+                alpha=self.config.alpha,
+                gamma=self.config.gamma,
+                dropout=self.config.dropout,
+                encoder_type="lstm",
+                lstm_layers=self.config.lstm_layers,
+                transformer_heads=self.config.transformer_heads,
+                transformer_layers=self.config.transformer_layers,
+            )
+        elif self.model_type == ModelType.IDEC_TRANSFORMER:
+            return ImprovedDECSequence(
+                input_dim=self.input_dim,
+                seq_len=self.config.seq_len,
+                n_clusters=self.config.n_clusters,
+                seq_hidden=self.config.seq_hidden,
+                latent_dim=self.config.latent_dim,
+                alpha=self.config.alpha,
+                gamma=self.config.gamma,
+                dropout=self.config.dropout,
+                encoder_type="transformer",
+                lstm_layers=self.config.lstm_layers,
+                transformer_heads=self.config.transformer_heads,
+                transformer_layers=self.config.transformer_layers,
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
@@ -291,7 +334,8 @@ class DeepClusteringTrainer:
                     loss = vae_loss(x, x_recon, mu, logvar, self.config.beta)
                 else:
                     z, x_recon = autoencoder(x)
-                    loss = reconstruction_loss(x, x_recon)
+                    target = x[:, -1, :] if self._uses_sequence_encoder() else x
+                    loss = reconstruction_loss(target, x_recon)
                 
                 loss.backward()
                 optimizer.step()
@@ -535,7 +579,13 @@ class DeepClusteringTrainer:
         self.model.train()
         for epoch in range(self.config.finetune_epochs):
             # Compute target distribution periodically
-            if self.model_type in [ModelType.DEC, ModelType.IDEC, ModelType.DMVC]:
+            if self.model_type in [
+                ModelType.DEC,
+                ModelType.IDEC,
+                ModelType.DMVC,
+                ModelType.IDEC_LSTM,
+                ModelType.IDEC_TRANSFORMER,
+            ]:
                 if epoch % self.config.update_interval == 0:
                     target_dist = self._compute_target_distribution(data)
             
@@ -561,6 +611,17 @@ class DeepClusteringTrainer:
                                    (batch_idx + 1) * self.config.finetune_batch_size].to(self.device)
                     kl_loss = kl_divergence_loss(q, p)
                     recon_loss = reconstruction_loss(x, x_recon)
+                    loss = kl_loss + self.config.gamma * recon_loss
+                    epoch_losses['clustering'] += kl_loss.item()
+                    epoch_losses['reconstruction'] += recon_loss.item()
+
+                elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
+                    q, z, x_recon = self.model(x)
+                    p = target_dist[batch_idx * self.config.finetune_batch_size:
+                                   (batch_idx + 1) * self.config.finetune_batch_size].to(self.device)
+                    x_target = x[:, -1, :]
+                    kl_loss = kl_divergence_loss(q, p)
+                    recon_loss = reconstruction_loss(x_target, x_recon)
                     loss = kl_loss + self.config.gamma * recon_loss
                     epoch_losses['clustering'] += kl_loss.item()
                     epoch_losses['reconstruction'] += recon_loss.item()
@@ -685,6 +746,9 @@ class DeepClusteringTrainer:
             for batch in loader:
                 x = batch[0].to(self.device)
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
+                    q, _, _ = self.model(x)
+                    q_list.append(q.cpu())
+                elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
                     q, _, _ = self.model(x)
                     q_list.append(q.cpu())
                 elif self.model_type == ModelType.DMVC:
@@ -907,6 +971,9 @@ class DeepClusteringTrainer:
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
                     q, _, _ = self.model(x)
                     pred = q.argmax(dim=1)
+                elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
+                    q, _, _ = self.model(x)
+                    pred = q.argmax(dim=1)
                 elif self.model_type == ModelType.DMVC:
                     q, _, _, _, _ = self.model(x)
                     pred = q.argmax(dim=1)
@@ -936,6 +1003,9 @@ class DeepClusteringTrainer:
                 x = batch[0].to(self.device)
                 
                 if self.model_type in [ModelType.DEC, ModelType.IDEC]:
+                    q, _, _ = self.model(x)
+                    probs.append(q.cpu().numpy())
+                elif self.model_type in (ModelType.IDEC_LSTM, ModelType.IDEC_TRANSFORMER):
                     q, _, _ = self.model(x)
                     probs.append(q.cpu().numpy())
                 elif self.model_type == ModelType.DMVC:
@@ -970,7 +1040,13 @@ class DeepClusteringTrainer:
     
     def get_cluster_centers(self) -> Optional[np.ndarray]:
         """Get cluster centers if available"""
-        if self.model_type in [ModelType.DEC, ModelType.IDEC, ModelType.DMVC]:
+        if self.model_type in [
+            ModelType.DEC,
+            ModelType.IDEC,
+            ModelType.DMVC,
+            ModelType.IDEC_LSTM,
+            ModelType.IDEC_TRANSFORMER,
+        ]:
             return self.model.clustering_layer.cluster_centers.detach().cpu().numpy()
         elif self.model_type == ModelType.VADE:
             return self.model.mu_c.detach().cpu().numpy()

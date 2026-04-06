@@ -87,7 +87,7 @@ class ClusterCorrelation:
     """Correlation between two clusters"""
     cluster_a: int
     cluster_b: int
-    correlation_type: str  # "same_source", "same_target", "temporal", "attack_chain"
+    correlation_type: str  # "same_source", "same_target", "attack_chain", "sequence_latent_similarity", ...
     correlation_strength: float
     shared_indicators: list[str] = field(default_factory=list)
     description: str = ""
@@ -912,12 +912,57 @@ class SecurityInsightsEngine:
     def find_cluster_correlations(
         self,
         cluster_profiles: list[dict],
-        events_by_cluster: dict[int, list[SecurityEvent]]
+        events_by_cluster: dict[int, list[SecurityEvent]],
+        latent_embeddings: Optional[np.ndarray] = None,
+        cluster_labels: Optional[np.ndarray] = None,
+        latent_similarity_threshold: float = 0.55,
     ) -> list[ClusterCorrelation]:
-        """Find correlations between clusters"""
+        """
+        Find correlations between clusters.
+
+        Combines (1) classical IOC / graph overlap heuristics with (2) optional
+        **sequence-model latent similarity**: when ``latent_embeddings`` and
+        ``cluster_labels`` are provided, cluster centroids in embedding space
+        are compared with cosine similarity (useful for LSTM/Transformer IDEC).
+        """
         correlations = []
         
         cluster_ids = list(events_by_cluster.keys())
+
+        # Latent-space similarity (sequence / deep embedding geometry)
+        if (
+            latent_embeddings is not None
+            and cluster_labels is not None
+            and len(latent_embeddings) == len(cluster_labels)
+            and latent_embeddings.ndim == 2
+        ):
+            uniq = sorted(set(int(c) for c in cluster_labels))
+            centroids: dict[int, np.ndarray] = {}
+            for cid in uniq:
+                mask = cluster_labels == cid
+                if not np.any(mask):
+                    continue
+                v = latent_embeddings[mask].mean(axis=0)
+                n = np.linalg.norm(v) + 1e-8
+                centroids[cid] = v / n
+            cids = sorted(centroids.keys())
+            for i, a in enumerate(cids):
+                for b in cids[i + 1 :]:
+                    sim = float(np.dot(centroids[a], centroids[b]))
+                    if sim >= latent_similarity_threshold:
+                        correlations.append(
+                            ClusterCorrelation(
+                                cluster_a=a,
+                                cluster_b=b,
+                                correlation_type="sequence_latent_similarity",
+                                correlation_strength=sim,
+                                shared_indicators=[],
+                                description=(
+                                    f"Sequence-embedding centroids align (cosine={sim:.3f}); "
+                                    f"clusters {a} and {b} may reflect related behaviors in latent space"
+                                ),
+                            )
+                        )
         
         for i, cluster_a in enumerate(cluster_ids):
             events_a = events_by_cluster[cluster_a]

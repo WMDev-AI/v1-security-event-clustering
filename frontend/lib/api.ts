@@ -2,7 +2,15 @@ const API_BASE = 'http://localhost:8000/api';
 
 export interface TrainingRequest {
   events: string[];
-  model_type: 'dec' | 'idec' | 'vade' | 'contrastive' | 'ufcm' | 'dmvc';
+  model_type:
+    | 'dec'
+    | 'idec'
+    | 'vade'
+    | 'contrastive'
+    | 'ufcm'
+    | 'dmvc'
+    | 'idec_lstm'
+    | 'idec_transformer';
   n_clusters: number;
   latent_dim: number;
   hidden_dims: number[];
@@ -10,6 +18,8 @@ export interface TrainingRequest {
   finetune_epochs: number;
   batch_size: number;
   learning_rate: number;
+  /** Temporal window for LSTM/Transformer IDEC; backend default 16 if omitted */
+  seq_len?: number;
 }
 
 export interface TrainingProgress {

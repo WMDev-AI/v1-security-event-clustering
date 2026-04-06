@@ -6,6 +6,8 @@ export const CLUSTERING_MODEL_SHORT: Record<string, string> = {
   contrastive: 'Contrastive',
   ufcm: 'UFCM',
   dmvc: 'DMVC',
+  idec_lstm: 'IDEC-LSTM',
+  idec_transformer: 'IDEC-Tr',
 }
 
 /** Full display names (aligned with training-config MODEL_INFO) */
@@ -16,6 +18,8 @@ export const CLUSTERING_MODEL_DISPLAY: Record<string, string> = {
   contrastive: 'Contrastive Deep Clustering',
   ufcm: 'Deep Unconstrained Fuzzy C-Means (UFCM)',
   dmvc: 'Deep Multi-View Clustering (DMVC)',
+  idec_lstm: 'IDEC with LSTM sequence encoder',
+  idec_transformer: 'IDEC with Transformer sequence encoder',
 }
 
 export function clusteringModelDisplayName(
