@@ -105,6 +105,7 @@ class ModelTypeEnum(str, Enum):
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
     IDEC_GNN = "idec_gnn"
+    BTGF = "btgf"
 
 
 class TrainingRequest(BaseModel):
@@ -140,6 +141,24 @@ class TrainingRequest(BaseModel):
         ge=1,
         le=8,
         description="Number of GCN layers for idec_gnn",
+    )
+    btgf_num_relations: int = Field(
+        default=2,
+        ge=2,
+        le=10,
+        description="Number of relations/views for BTGF",
+    )
+    btgf_k: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        description="Filter iterations for BTGF",
+    )
+    btgf_a: float = Field(
+        default=100.0,
+        gt=0,
+        le=1000,
+        description="Regularization parameter for BTGF filter",
     )
 
 
@@ -485,6 +504,9 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
         gnn_k_neighbors=request.gnn_k_neighbors,
         gnn_hidden_dim=request.gnn_hidden_dim,
         gnn_num_layers=request.gnn_num_layers,
+        btgf_num_relations=request.btgf_num_relations,
+        btgf_k=request.btgf_k,
+        btgf_a=request.btgf_a,
     )
     
     # Create job - store raw events, parsing happens in background

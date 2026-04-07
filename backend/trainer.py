@@ -32,6 +32,7 @@ from deep_clustering import (
     DeepUFCM,
     DeepMultiViewClustering,
     SecurityEventAutoEncoder,
+    BarlowTwinsGuidedFilterClustering,
     reconstruction_loss,
     kl_divergence_loss,
     vae_loss,
@@ -52,6 +53,7 @@ class ModelType(str, Enum):
     IDEC_LSTM = "idec_lstm"
     IDEC_TRANSFORMER = "idec_transformer"
     IDEC_GNN = "idec_gnn"
+    BTGF = "btgf"
 
 
 @dataclass
@@ -101,6 +103,15 @@ class TrainingConfig:
     gnn_k_neighbors: int = 10
     gnn_hidden_dim: int = 128
     gnn_num_layers: int = 2
+    
+    # BTGF specific
+    btgf_k: int = 2  # Filter iterations
+    btgf_a: float = 100.0  # Regularization
+    btgf_f: int = 1  # Filter order
+    btgf_lambda_rec: float = 1.0
+    btgf_lambda_bt: float = 1.0
+    btgf_lambda_kl: float = 1.0
+    btgf_num_relations: int = 2  # Number of relations/views
     
     # General
     weight_decay: float = 1e-5
@@ -306,6 +317,17 @@ class DeepClusteringTrainer:
                 gamma=self.config.gamma,
                 dropout=self.config.dropout,
             )
+        elif self.model_type == ModelType.BTGF:
+            input_dims = [self.input_dim] * self.config.btgf_num_relations
+            return BarlowTwinsGuidedFilterClustering(
+                input_dims=input_dims,
+                latent_dim=self.config.latent_dim,
+                num_clusters=self.config.n_clusters,
+                dropout=self.config.dropout,
+                lambda_rec=self.config.btgf_lambda_rec,
+                lambda_bt=self.config.btgf_lambda_bt,
+                lambda_kl=self.config.btgf_lambda_kl
+            )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
     
@@ -346,6 +368,50 @@ class DeepClusteringTrainer:
             await self._pretrain_dmvc(loader, progress_callback)
             self.is_pretrained = True
             print("Pretraining complete!")
+            return
+        elif self.model_type == ModelType.BTGF:
+            # Pretrain each MLP with reconstruction
+            optimizer = optim.Adam(
+                self.model.parameters(),
+                lr=self.config.pretrain_lr,
+                weight_decay=self.config.weight_decay
+            )
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
+            
+            self.model.train()
+            for epoch in range(self.config.pretrain_epochs):
+                epoch_loss = 0.0
+                n_batches = 0
+                
+                for batch in loader:
+                    x = batch[0].to(self.device)
+                    # Use same x for all relations during pretrain
+                    X_list = [x] * self.config.btgf_num_relations
+                    
+                    optimizer.zero_grad()
+                    z_list, x_bar_list, _ = self.model(X_list)
+                    loss = self.model.reconstruction_loss(X_list, x_bar_list)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    epoch_loss += loss.item()
+                    n_batches += 1
+                
+                scheduler.step()
+                avg_loss = epoch_loss / n_batches
+                self.history['pretrain_loss'].append(avg_loss)
+                
+                if progress_callback:
+                    if inspect.iscoroutinefunction(progress_callback):
+                        await progress_callback(epoch, avg_loss)
+                    else:
+                        progress_callback(epoch, avg_loss)
+                
+                if (epoch + 1) % 10 == 0:
+                    print(f"BTGF Pretrain Epoch {epoch + 1}/{self.config.pretrain_epochs}, Loss: {avg_loss:.6f}")
+            
+            self.is_pretrained = True
+            print("BTGF pretraining complete!")
             return
         else:
             autoencoder = self.model.autoencoder if hasattr(self.model, 'autoencoder') else self.model.dec.autoencoder
@@ -728,6 +794,18 @@ class DeepClusteringTrainer:
                     loss = contrastive_loss + 0.5 * consistency_loss + 0.1 * entropy_loss
                     epoch_losses['clustering'] += loss.item()
                 
+                elif self.model_type == ModelType.BTGF:
+                    # Create multiple views with augmentation
+                    X_list = []
+                    for _ in range(self.config.btgf_num_relations):
+                        x_aug = x + torch.randn_like(x) * 0.1  # Add noise for augmentation
+                        X_list.append(x_aug)
+                    
+                    z_list, x_bar_list, h = self.model(X_list)
+                    loss, q = self.model.total_loss(X_list, z_list, x_bar_list, h, x.size(0))
+                    epoch_losses['total'] += loss.item()
+                    epoch_losses['clustering'] += loss.item()  # Approximate
+                    
                 loss.backward()
                 optimizer.step()
                 
@@ -1043,6 +1121,16 @@ class DeepClusteringTrainer:
                     u, _, _ = self.model(x)
                     pred = u.argmax(dim=1)
 
+                elif self.model_type == ModelType.BTGF:
+                    # Create multiple views
+                    X_list = []
+                    for _ in range(self.config.btgf_num_relations):
+                        x_aug = x + torch.randn_like(x) * 0.1
+                        X_list.append(x_aug)
+                    _, _, h = self.model(X_list)
+                    q = self.model.get_cluster_prob(h)
+                    pred = q.argmax(dim=1)
+
                 predictions.append(pred.cpu().numpy())
         
         return np.concatenate(predictions, axis=0)
@@ -1080,6 +1168,16 @@ class DeepClusteringTrainer:
                     u, _, _ = self.model(x)
                     probs.append(u.cpu().numpy())
 
+                elif self.model_type == ModelType.BTGF:
+                    # Create multiple views
+                    X_list = []
+                    for _ in range(self.config.btgf_num_relations):
+                        x_aug = x + torch.randn_like(x) * 0.1
+                        X_list.append(x_aug)
+                    _, _, h = self.model(X_list)
+                    q = self.model.get_cluster_prob(h)
+                    probs.append(q.cpu().numpy())
+
         return np.concatenate(probs, axis=0)
     
     def get_latent_representations(self, data: np.ndarray) -> np.ndarray:
@@ -1092,8 +1190,18 @@ class DeepClusteringTrainer:
         with torch.no_grad():
             for batch in loader:
                 x = batch[0].to(self.device)
-                z = self.model.encode(x)
-                latent.append(z.cpu().numpy())
+                
+                if self.model_type == ModelType.BTGF:
+                    # Create multiple views
+                    X_list = []
+                    for _ in range(self.config.btgf_num_relations):
+                        x_aug = x + torch.randn_like(x) * 0.1
+                        X_list.append(x_aug)
+                    _, _, h = self.model(X_list)
+                    latent.append(h.cpu().numpy())
+                else:
+                    z = self.model.encode(x)
+                    latent.append(z.cpu().numpy())
         
         return np.concatenate(latent, axis=0)
     
@@ -1106,6 +1214,7 @@ class DeepClusteringTrainer:
             ModelType.IDEC_LSTM,
             ModelType.IDEC_TRANSFORMER,
             ModelType.IDEC_GNN,
+            ModelType.BTGF,
         ]:
             return self.model.clustering_layer.cluster_centers.detach().cpu().numpy()
         elif self.model_type == ModelType.VADE:

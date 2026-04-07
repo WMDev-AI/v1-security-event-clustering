@@ -12,7 +12,8 @@ export interface TrainingRequest {
     | 'dmvc'
     | 'idec_lstm'
     | 'idec_transformer'
-    | 'idec_gnn';
+    | 'idec_gnn'
+    | 'btgf';
   n_clusters: number;
   latent_dim: number;
   hidden_dims: number[];
@@ -26,6 +27,10 @@ export interface TrainingRequest {
   gnn_k_neighbors?: number;
   gnn_hidden_dim?: number;
   gnn_num_layers?: number;
+  /** BTGF parameters */
+  btgf_num_relations?: number;
+  btgf_k?: number;
+  btgf_a?: number;
 }
 
 export interface TrainingProgress {

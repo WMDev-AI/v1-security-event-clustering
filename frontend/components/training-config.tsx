@@ -104,6 +104,13 @@ const MODEL_INFO = {
       'Each training batch builds a symmetric k-NN graph on normalized event features; stacked graph convolution layers aggregate neighbor context into a latent vector, then the same IDEC objective (KL + reconstruction) applies.',
     pros: ['Relational signal in feature space', 'No extra log metadata required'],
     best_for: 'When events in a batch that look alike should reinforce each other’s representation'
+  },
+  btgf: {
+    name: 'Barlow Twins Guided Filter (BTGF)',
+    description:
+      'Multi-relational clustering using Barlow Twins self-supervised learning with guided filtering. Processes multiple augmented views of events as relations, combining contrastive loss with reconstruction and clustering objectives.',
+    pros: ['Self-supervised representation learning', 'Robust to augmentations', 'Multi-view fusion'],
+    best_for: 'Complex security event data with multiple semantic relations or when augmentation improves clustering'
   }
 }
 
@@ -119,12 +126,16 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
   const [gnnK, setGnnK] = useState(10)
   const [gnnHidden, setGnnHidden] = useState(128)
   const [gnnLayers, setGnnLayers] = useState(2)
+  const [btgfNumRelations, setBtgfNumRelations] = useState(2)
+  const [btgfK, setBtgfK] = useState(2)
+  const [btgfA, setBtgfA] = useState(100)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const usesSequenceModel =
     modelType === 'idec_lstm' ||
     modelType === 'idec_transformer' ||
     modelType === 'ufcm_lstm'
   const usesGnnModel = modelType === 'idec_gnn'
+  const usesBtgfModel = modelType === 'btgf'
   
   // Update events when preloaded events change
   useEffect(() => {
@@ -154,6 +165,13 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
             gnn_k_neighbors: gnnK,
             gnn_hidden_dim: gnnHidden,
             gnn_num_layers: gnnLayers,
+          }
+        : {}),
+      ...(usesBtgfModel
+        ? {
+            btgf_num_relations: btgfNumRelations,
+            btgf_k: btgfK,
+            btgf_a: btgfA,
           }
         : {}),
     }
@@ -465,6 +483,86 @@ export function TrainingConfig({ onSubmit, isLoading, sampleEvents, preloadedEve
                     step={1}
                   />
                 </div>
+              )}
+
+              {usesBtgfModel && (
+                <>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-1.5">
+                        Number of Relations/Views
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p className="max-w-[220px] text-xs">
+                              Number of augmented views treated as relations. Each view is a noisy version of the input for contrastive learning.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{btgfNumRelations}</span>
+                    </div>
+                    <Slider
+                      value={[btgfNumRelations]}
+                      onValueChange={([v]) => setBtgfNumRelations(v)}
+                      min={2}
+                      max={10}
+                      step={1}
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-1.5">
+                        Filter Iterations (k)
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p className="max-w-[220px] text-xs">
+                              Number of iterations for the guided filter refinement. Higher values increase filtering strength.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{btgfK}</span>
+                    </div>
+                    <Slider
+                      value={[btgfK]}
+                      onValueChange={([v]) => setBtgfK(v)}
+                      min={1}
+                      max={4}
+                      step={1}
+                    />
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="flex items-center gap-1.5">
+                        Regularization (a)
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p className="max-w-[220px] text-xs">
+                              Regularization parameter for the guided filter. Controls the balance between filtering and preserving structure.
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </Label>
+                      <span className="text-sm font-mono bg-muted px-2 py-0.5 rounded">{btgfA}</span>
+                    </div>
+                    <Slider
+                      value={[btgfA]}
+                      onValueChange={([v]) => setBtgfA(v)}
+                      min={1}
+                      max={1000}
+                      step={10}
+                    />
+                  </div>
+                </>
               )}
             </CardContent>
           )}

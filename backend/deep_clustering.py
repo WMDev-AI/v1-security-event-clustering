@@ -8,8 +8,73 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from sklearn.cluster import KMeans
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from abc import ABC, abstractmethod
+import math
+from itertools import combinations
+
+
+def fgc_filter(A: torch.Tensor, X: torch.Tensor, k: int, a: float, f: int = 1) -> torch.Tensor:
+    """
+    Barlow Twins Guided Filter for graph signal processing.
+    A: adjacency matrix [n, n]
+    X: feature matrix [n, d]
+    k: number of iterations
+    a: regularization parameter
+    f: filter order
+    Returns filtered X
+    """
+    n = A.size(0)
+    d = X.size(1)
+    device = A.device
+    
+    # Identity matrix
+    I_n = torch.eye(n, device=device)
+    I_d = torch.eye(d, device=device)
+    
+    # Normalize adjacency
+    A = A + I_n  # Add self-loops
+    D = A.sum(dim=1, keepdim=True)
+    D_norm = D.pow(-0.5)
+    A_norm = D_norm * A * D_norm.t()
+    
+    # Laplacian
+    Ls = I_n - A_norm
+    G = I_n - 0.5 * Ls
+    
+    # Polynomial filter
+    A_ = I_n
+    for _ in range(f):
+        A_ = G @ A_
+    
+    # Iterative refinement
+    G_ = G
+    for iteration in range(k):
+        X_bar = G_ @ X
+        XtX_bar = X_bar.t() @ X_bar
+        XXt_bar = X_bar @ X_bar.t()
+        
+        # Inverse computation
+        tmp = torch.linalg.inv(I_d + XXt_bar / a)
+        tmp = X_bar @ tmp @ X_bar.t()
+        tmp = I_n / a - tmp / (a * a)
+        
+        # Filtered update
+        S = tmp @ (a * A_ + XtX_bar)
+        G_ = G_ @ G
+    
+    X_filtered = S @ X
+    return X_filtered
+
+
+def fgc_multi(A_list: List[torch.Tensor], X_list: List[torch.Tensor], k: int, a: float, f: int = 1) -> List[torch.Tensor]:
+    """
+    Apply filter to multiple relations.
+    """
+    X_filtered = []
+    for A, X in zip(A_list, X_list):
+        X_filtered.append(fgc_filter(A, X, k, a, f))
+    return X_filtered
 
 
 class BaseAutoEncoder(nn.Module, ABC):
@@ -30,6 +95,132 @@ class BaseAutoEncoder(nn.Module, ABC):
         z = self.encode(x)
         x_recon = self.decode(z)
         return z, x_recon
+
+
+class BTGFMLP(nn.Module):
+    """
+    MLP-based autoencoder for BTGF, adapted for multi-relational inputs.
+    """
+    
+    def __init__(self, input_dim: int, latent_dim: int = 10, dropout: float = 0.0):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, latent_dim),
+            nn.Dropout(dropout)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, input_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        z = self.encoder(x)
+        x_recon = self.decoder(z)
+        return z, x_recon
+
+
+class BarlowTwinsGuidedFilterClustering(nn.Module):
+    """
+    BTGF clustering model for multi-relational security event data.
+    """
+    
+    def __init__(
+        self,
+        input_dims: List[int],
+        latent_dim: int = 10,
+        num_clusters: int = 10,
+        dropout: float = 0.0,
+        lambda_rec: float = 1.0,
+        lambda_bt: float = 1.0,
+        lambda_kl: float = 1.0
+    ):
+        super().__init__()
+        self.num_relations = len(input_dims)
+        self.latent_dim = latent_dim
+        self.num_clusters = num_clusters
+        self.lambda_rec = lambda_rec
+        self.lambda_bt = lambda_bt
+        self.lambda_kl = lambda_kl
+        
+        # MLPs for each relation
+        self.mlps = nn.ModuleList([
+            BTGFMLP(dim, latent_dim, dropout) for dim in input_dims
+        ])
+        
+        # Clustering layer
+        self.cluster_layer = ClusteringLayer(latent_dim * self.num_relations, num_clusters)
+    
+    def forward(self, X_list: List[torch.Tensor]) -> Tuple[List[torch.Tensor], List[torch.Tensor], torch.Tensor]:
+        """
+        Forward pass for multi-relational inputs.
+        X_list: list of [batch, dim] tensors
+        Returns: z_list, x_bar_list, h_concat
+        """
+        z_list = []
+        x_bar_list = []
+        for i, X in enumerate(X_list):
+            z, x_bar = self.mlps[i](X)
+            z_list.append(z)
+            x_bar_list.append(x_bar)
+        
+        # Concatenate embeddings
+        h = torch.cat(z_list, dim=1)
+        return z_list, x_bar_list, h
+    
+    def get_cluster_prob(self, h: torch.Tensor) -> torch.Tensor:
+        """Get soft cluster assignments"""
+        return self.cluster_layer(h)
+    
+    def barlow_twins_loss(self, z_list: List[torch.Tensor], batch_size: int) -> torch.Tensor:
+        """Barlow Twins loss for multi-relational views"""
+        loss = 0.0
+        bn = nn.BatchNorm1d(self.latent_dim, affine=False)
+        for i, j in combinations(range(len(z_list)), 2):
+            z_i = bn(z_list[i])
+            z_j = bn(z_list[j])
+            c = z_i.t() @ z_j / batch_size
+            
+            # On-diagonal: (diag - 1)^2
+            on_diag = torch.sum((torch.diag(c) - 1) ** 2)
+            # Off-diagonal: sum of squares
+            off_diag = torch.sum(c ** 2) - torch.sum(torch.diag(c) ** 2)
+            
+            loss += on_diag + 0.0051 * off_diag
+        return loss
+    
+    def sce_loss(self, x: torch.Tensor, x_bar: torch.Tensor, alpha: float = 2.0) -> torch.Tensor:
+        """Symmetric cross-entropy loss"""
+        cos_sim = F.cosine_similarity(x, x_bar, dim=1)
+        loss = (1 - cos_sim) ** alpha
+        return loss.mean()
+    
+    def reconstruction_loss(self, X_list: List[torch.Tensor], x_bar_list: List[torch.Tensor]) -> torch.Tensor:
+        """Multi-relational reconstruction loss"""
+        loss = 0.0
+        for X, x_bar in zip(X_list, x_bar_list):
+            loss += self.sce_loss(X, x_bar)
+        return loss
+    
+    def clustering_loss(self, q: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+        """KL divergence for clustering"""
+        return F.kl_div(q.log(), p, reduction='batchmean')
+    
+    def target_distribution(self, q: torch.Tensor) -> torch.Tensor:
+        """Student t-distribution target"""
+        weight = q ** 2 / q.sum(dim=0)
+        return (weight.t() / weight.sum(dim=1)).t()
+    
+    def total_loss(self, X_list: List[torch.Tensor], z_list: List[torch.Tensor], x_bar_list: List[torch.Tensor], h: torch.Tensor, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute total BTGF loss"""
+        rec_loss = self.reconstruction_loss(X_list, x_bar_list)
+        bt_loss = self.barlow_twins_loss(z_list, batch_size)
+        
+        q = self.get_cluster_prob(h)
+        p = self.target_distribution(q)
+        kl_loss = self.clustering_loss(q, p)
+        
+        total = self.lambda_rec * rec_loss + self.lambda_bt * bt_loss + self.lambda_kl * kl_loss
+        return total, q
 
 
 class SecurityEventAutoEncoder(BaseAutoEncoder):
