@@ -115,17 +115,12 @@ class ClusterAnalyzer:
         hours = Counter()
         content_words = Counter()
         
-        # Subsystem-specific collectors
-        urls = Counter()
-        response_codes = Counter()
-        rule_names = Counter()
-        malwares = Counter()
-        vpn_users = Counter()
-        senders = Counter()
-        recipients = Counter()
-        attack_vectors = Counter()
-        dns_queries = Counter()
-        policies = Counter()
+        # Subsystem-specific collectors (current 8-subsystem schema)
+        vpn_src_users = Counter()
+        mail_senders = Counter()
+        mail_recipients = Counter()
+        waf_reasons = Counter()
+        ips_reasons = Counter()
         
         weekend_count = 0
         business_hours_count = 0
@@ -154,26 +149,16 @@ class ClusterAnalyzer:
                 has_user_count += 1
             
             # Subsystem-specific field collection
-            if event.url:
-                urls[event.url] += 1
-            if event.response_code > 0:
-                response_codes[event.response_code] += 1
-            if event.rule_name:
-                rule_names[event.rule_name] += 1
-            if event.malware_name:
-                malwares[event.malware_name] += 1
-            if event.vpn_user:
-                vpn_users[event.vpn_user] += 1
-            if event.sender:
-                senders[event.sender] += 1
-            if event.recipient:
-                recipients[event.recipient] += 1
-            if event.attack_vector:
-                attack_vectors[event.attack_vector] += 1
-            if event.dns_query:
-                dns_queries[event.dns_query] += 1
-            if event.firewall_policy:
-                policies[event.firewall_policy] += 1
+            if event.vpn_srcuser:
+                vpn_src_users[event.vpn_srcuser] += 1
+            if event.mail_from:
+                mail_senders[event.mail_from] += 1
+            if event.mail_to:
+                mail_recipients[event.mail_to] += 1
+            if event.reason and event.subsystem == "waf":
+                waf_reasons[event.reason] += 1
+            if event.ips_reason:
+                ips_reasons[event.ips_reason] += 1
             
             # Temporal analysis
             if event.timestamp:
@@ -323,68 +308,68 @@ class ClusterAnalyzer:
         
         for event in events:
             # WAF/Web Filter threats
-            if event.subsystem in ['waf', 'webfilter']:
-                if event.response_code >= 400:
-                    threat_score += 1
-                if '403' in str(event.response_code) or '503' in str(event.response_code):
+            if event.subsystem == "waf":
+                if event.reason and any(x in event.reason.lower() for x in ["banned", "neterror", "unreachable"]):
+                    indicators.append(f"WAF reason indicates threat: {event.reason[:60]}")
                     threat_score += 2
-                if event.url and any(x in event.url.lower() for x in ['admin', 'login', '.php', '.asp', '.jsp']):
-                    indicators.append(f"Web attack targeting sensitive path: {event.url[:50]}")
-                    threat_score += 3
-                if event.attack_type and 'sql' in event.attack_type.lower():
-                    indicators.append(f"SQL Injection attempt detected")
-                    threat_score += 4
+                if event.waf_count > 100:
+                    threat_score += 1
             
             # IPS/IDS threats
             elif event.subsystem == 'ips':
-                if event.rule_name and any(x in event.rule_name.lower() for x in ['exploit', 'shellcode', 'backdoor']):
-                    indicators.append(f"Exploit/malware signature detected: {event.rule_name}")
-                    threat_score += 5
-                if event.attack_type and 'reconnaissance' in event.attack_type.lower():
+                if event.ips_reason and any(x in event.ips_reason.lower() for x in ['exploit', 'shellcode', 'backdoor', 'injection']):
+                    indicators.append(f"IPS reason indicates exploit activity: {event.ips_reason[:60]}")
+                    threat_score += 4
+                if event.ips_dropcount > 0:
                     threat_score += 2
             
             # VPN threats
             elif event.subsystem == 'vpn':
-                # Check for multiple VPN users accessing unusual hours
-                if event.vpn_user and event.timestamp:
+                if event.vpn_srcuser and event.timestamp:
                     threat_score += 1
-                if event.vpn_bytes_in > 1e9 or event.vpn_bytes_out > 1e9:
-                    indicators.append(f"Unusual VPN data volume detected: {max(event.vpn_bytes_in, event.vpn_bytes_out) / 1e9:.1f}GB")
+                if event.rule and event.rule.lower() in ["virtualfirewall", "accesslist"]:
+                    threat_score += 1
+                if event.vpn_count > 200:
+                    indicators.append(f"High VPN event count: {event.vpn_count}")
                     threat_score += 2
             
             # Mail/DLP threats
-            elif event.subsystem in ['mail', 'dlp']:
-                if event.attachment_count > 5:
-                    indicators.append(f"High number of attachments: {event.attachment_count}")
+            elif event.subsystem == "mail":
+                if event.mail_size > 2_000_000:
+                    indicators.append(f"Large mail payload size: {event.mail_size}")
                     threat_score += 2
-                if event.dlp_category and any(x in event.dlp_category.lower() for x in ['confidential', 'restricted', 'pii', 'credit']):
-                    indicators.append(f"Sensitive data category detected: {event.dlp_category}")
+                if event.rule and any(x in event.rule.lower() for x in ["virus", "spam"]):
+                    indicators.append(f"Mail rule indicates malicious content: {event.rule}")
                     threat_score += 4
             
             # Sandbox/AV threats
-            elif event.subsystem in ['sandbox', 'antivirus']:
-                if event.malware_name:
-                    indicators.append(f"Malware detected: {event.malware_name}")
-                    threat_score += 5
-                if event.sandbox_verdict and 'malicious' in event.sandbox_verdict.lower():
-                    threat_score += 4
-            
-            # DDoS threats
             elif event.subsystem == 'ddos':
-                if event.attack_vector:
-                    indicators.append(f"DDoS attack: {event.attack_vector}")
+                if event.ddos_attack_type:
+                    indicators.append(f"DDoS attack type: {event.ddos_attack_type}")
                     threat_score += 4
-                if event.bandwidth_consumed > 1e9:  # > 1GB/s
-                    indicators.append(f"High bandwidth DDoS: {event.bandwidth_consumed / 1e9:.1f}GB/s")
+                if event.ddos_mbps > 1000:
+                    indicators.append(f"High DDoS bandwidth: {event.ddos_mbps} mbps")
                     threat_score += 3
-                if event.packets_dropped > 100000:
+                if event.ddos_pps > 50000:
                     threat_score += 2
-            
-            # DNS threats
-            elif event.subsystem == 'dns':
-                if event.dns_query and any(x in event.dns_query.lower() for x in ['.tk', '.ml', '.ga', 'ddns', 'dyn']):
-                    indicators.append(f"Suspect DNS query: {event.dns_query}")
-                    threat_score += 3
+
+            elif event.subsystem == "websec":
+                c = (event.content or "").lower()
+                if any(x in c for x in ["denied", "neterror", "banned"]):
+                    indicators.append("WebSec content indicates blocked or unreachable request")
+                    threat_score += 2
+
+            elif event.subsystem == "appcontrol":
+                if event.app_mark:
+                    threat_score += 1
+                if event.app_count > 500:
+                    threat_score += 2
+
+            elif event.subsystem == "firewall":
+                if event.fw_count > 1000:
+                    threat_score += 2
+                if event.fw_ttl and event.fw_ttl < 10:
+                    threat_score += 1
         
         return threat_score, indicators[:5]  # Return top 5 indicators
     

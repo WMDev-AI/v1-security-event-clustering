@@ -1,9 +1,16 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react"
+import { useState, useEffect, useRef, useMemo } from "react"
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import type { SecurityEvent, EventTableQuery, EventTableSortColumn } from "@/lib/api"
 import { formatEventDateTime } from "@/lib/format-event-datetime"
 import { cn } from "@/lib/utils"
@@ -26,6 +33,41 @@ const inputClass =
   "h-7 w-full min-w-0 rounded border border-input bg-background px-1.5 text-[11px] placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
 
 const FILTER_DEBOUNCE_MS = 350
+const SUBSYSTEMS = ["ddos", "firewall", "ips", "appcontrol", "waf", "websec", "mail", "vpn"] as const
+const CORE_KEYS = new Set([
+  "index",
+  "timestamp",
+  "source_ip",
+  "dest_ip",
+  "dest_port",
+  "subsystem",
+  "action",
+  "severity",
+  "content",
+])
+
+function renderExtraFields(e: EventTableRow): string[] {
+  const out: string[] = []
+  const row = e as Record<string, unknown>
+  const pushIf = (label: string, value: unknown) => {
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      out.push(`${label}: ${String(value)}`)
+    }
+  }
+
+  pushIf("rule", row["rule"])
+  pushIf("attacktype", row["ddos_attack_type"])
+  pushIf("groupid", row["ips_groupid"])
+  pushIf("vhost", row["waf_vhost"])
+  pushIf("serverity", row["mail_severity"])
+  pushIf("reason", row["reason"] ?? row["ips_reason"])
+  pushIf(
+    "count",
+    row["ddos_count"] ?? row["fw_count"] ?? row["app_count"] ?? row["waf_count"] ?? row["vpn_count"]
+  )
+
+  return out.slice(0, 4)
+}
 
 export interface EventsPopupTableProps {
   events: EventTableRow[]
@@ -50,6 +92,8 @@ export function EventsPopupTable({
 }: EventsPopupTableProps) {
   const [pageInput, setPageInput] = useState(String(page))
   const [filterDraft, setFilterDraft] = useState(query.filters)
+  const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null)
+  const [showAttributes, setShowAttributes] = useState(true)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -107,6 +151,21 @@ export function EventsPopupTable({
     )
   }
 
+  const rowKey = (e: EventTableRow, rowIdx: number) =>
+    e.index !== undefined ? `i-${e.index}` : `r-${rowIdx}-${String(e.timestamp ?? "")}`
+
+  const selectedEvent = useMemo(
+    () => events.find((e, idx) => rowKey(e, idx) === selectedEventKey) ?? null,
+    [events, selectedEventKey]
+  )
+
+  const selectedAttributes = useMemo(() => {
+    if (!selectedEvent) return []
+    return Object.entries(selectedEvent as Record<string, unknown>)
+      .filter(([k, v]) => !CORE_KEYS.has(k) && v !== undefined && v !== null && String(v).trim() !== "")
+      .sort(([a], [b]) => a.localeCompare(b))
+  }, [selectedEvent])
+
   return (
     <div className="space-y-3">
       <ScrollArea className="h-[56vh] rounded-md border">
@@ -129,14 +188,33 @@ export function EventsPopupTable({
             <tr className="border-t border-border/50">
               {COLUMNS.map((col) => (
                 <th key={`f-${col.key}`} className={cn("px-2 py-1", col.width)}>
-                  <input
-                    type="search"
-                    placeholder="Filter…"
-                    className={inputClass}
-                    value={filterDraft[col.key] ?? ""}
-                    onChange={(e) => onFilterChange(col.key, e.target.value)}
-                    aria-label={`Filter ${col.label}`}
-                  />
+                  {col.key === "subsystem" ? (
+                    <Select
+                      value={(filterDraft[col.key] ?? "").toLowerCase()}
+                      onValueChange={(v) => onFilterChange(col.key, v === "__all__" ? "" : v)}
+                    >
+                      <SelectTrigger className={cn(inputClass, "h-7 text-[11px]")}>
+                        <SelectValue placeholder="Subsystem" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All subsystems</SelectItem>
+                        {SUBSYSTEMS.map((s) => (
+                          <SelectItem key={s} value={s}>
+                            {s}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <input
+                      type="search"
+                      placeholder="Filter…"
+                      className={inputClass}
+                      value={filterDraft[col.key] ?? ""}
+                      onChange={(e) => onFilterChange(col.key, e.target.value)}
+                      aria-label={`Filter ${col.label}`}
+                    />
+                  )}
                 </th>
               ))}
             </tr>
@@ -144,12 +222,12 @@ export function EventsPopupTable({
           <tbody>
             {events.map((e, rowIdx) => (
               <tr
-                key={
-                  e.index !== undefined
-                    ? `i-${e.index}`
-                    : `r-${rowIdx}-${String(e.timestamp ?? "")}`
-                }
-                className="border-t border-border/50 align-top"
+                key={rowKey(e, rowIdx)}
+                className={cn(
+                  "border-t border-border/50 align-top cursor-pointer",
+                  selectedEventKey === rowKey(e, rowIdx) && "bg-muted/40"
+                )}
+                onClick={() => setSelectedEventKey(rowKey(e, rowIdx))}
               >
                 <td className="px-2 py-1.5 text-xs text-muted-foreground font-mono">
                   {e.index ?? "—"}
@@ -164,13 +242,59 @@ export function EventsPopupTable({
                 <td className="px-2 py-1.5 text-xs break-words">{e.action || "—"}</td>
                 <td className="px-2 py-1.5 text-xs">{e.severity || "—"}</td>
                 <td className="px-2 py-1.5 text-xs text-muted-foreground break-words max-w-md">
-                  {e.content || "—"}
+                  <div className="space-y-1">
+                    <div>{e.content || "—"}</div>
+                    {renderExtraFields(e).length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {renderExtraFields(e).map((x) => (
+                          <span
+                            key={x}
+                            className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground/80"
+                          >
+                            {x}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </ScrollArea>
+
+      {selectedEvent && (
+        <div className="rounded-md border bg-muted/20">
+          <button
+            type="button"
+            className="w-full flex items-center justify-between px-3 py-2 text-sm font-medium"
+            onClick={() => setShowAttributes((v) => !v)}
+          >
+            <span>Event Attributes</span>
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              {selectedAttributes.length} fields
+              {showAttributes ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            </span>
+          </button>
+          {showAttributes && (
+            <div className="border-t px-3 py-2">
+              {selectedAttributes.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No extra parsed fields on this event.</p>
+              ) : (
+                <div className="grid gap-1.5 sm:grid-cols-2">
+                  {selectedAttributes.map(([k, v]) => (
+                    <div key={k} className="rounded border bg-background px-2 py-1.5 text-xs">
+                      <span className="text-muted-foreground">{k}</span>
+                      <div className="font-mono break-all">{String(v)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <p className="text-xs text-muted-foreground">

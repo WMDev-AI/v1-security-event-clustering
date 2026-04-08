@@ -870,16 +870,16 @@ async def analyze_events(request: AnalyzeRequest):
 async def get_demo_events():
     """Get sample security events for demonstration"""
     sample_events = [
-        "timestamp=2024-01-15 08:30:00 sourceip=192.168.1.100 destip=10.0.0.50 destport=443 subsys=firewall action=allow proto=HTTPS user=john.doe",
-        "timestamp=2024-01-15 08:31:00 sourceip=203.0.113.50 destip=10.0.0.1 destport=22 subsys=ips action=blocked content='SSH brute force attempt detected'",
-        "timestamp=2024-01-15 08:32:00 sourceip=192.168.1.150 destip=8.8.8.8 destport=53 subsys=dns action=allow proto=UDP",
-        "timestamp=2024-01-15 08:33:00 sourceip=198.51.100.25 destip=10.0.0.80 destport=80 subsys=waf action=blocked content='SQL injection attempt'",
-        "timestamp=2024-01-15 08:34:00 sourceip=192.168.1.200 destip=10.0.0.25 destport=25 subsys=mail action=quarantine content='Phishing email detected'",
-        "timestamp=2024-01-15 08:35:00 sourceip=172.16.0.50 destip=external destport=443 subsys=vpn action=allow user=remote.user content='VPN tunnel established'",
-        "timestamp=2024-01-15 08:36:00 sourceip=10.10.10.10 destip=192.168.1.1 destport=445 subsys=firewall action=denied content='SMB traffic blocked'",
-        "timestamp=2024-01-15 08:37:00 sourceip=203.0.113.100 destip=10.0.0.1 destport=3389 subsys=ips severity=high action=blocked content='RDP brute force'",
-        "timestamp=2024-01-15 08:38:00 sourceip=192.168.1.50 destip=malware.bad.com destport=80 subsys=webfilter action=blocked content='Malware site blocked'",
-        "timestamp=2024-01-15 08:39:00 sourceip=198.51.100.50 destip=10.0.0.100 destport=4444 subsys=ddos severity=critical action=blocked content='DDoS attack mitigated'",
+        "timestamp=2024-01-15 08:30:00 subsys=firewall proto=HTTPS srcip=192.168.1.100 dstip=10.0.0.50 srcport=51555 dstport=443 rule=site_unreachable action=pass count=8 len=512 ttl=64 tos=0 initf=eth0 outitf=eth1",
+        "timestamp=2024-01-15 08:31:00 subsys=ips proto=TCP srcip=203.0.113.50 dstip=10.0.0.1 srcport=44221 dstport=22 rule=shellcode_error action=block groupid=1201 reason='shellcode_error' alertcount=12 dropcount=12",
+        "timestamp=2024-01-15 08:32:00 subsys=appcontrol proto=TCP srcip=192.168.1.150 dstip=10.0.0.10 srcport=60123 dstport=443 rule=neterror action=block count=4 len=1024 ttl=59 tos=0 initf=eth1 outitf=eth0 mark=0x2001",
+        "timestamp=2024-01-15 08:33:00 subsys=waf proto=HTTP srcip=198.51.100.25 dstip=10.0.0.80 srcport=53311 dstport=80 rule=bannedextension action=block reason='banned extension' client=198.51.100.25 server=10.0.0.80 vhost='10.0.0.80:80' count=3",
+        "timestamp=2024-01-15 08:34:00 subsys=websec proto=HTTP srcip=192.168.1.200 dstip=10.0.0.25 srcport=42111 dstport=80 rule=bannedMIME action=block content='http 3.1.2.4 http://3.1.2.4/test/1.pdf /Denied/Banned File MIME type text/pdf'",
+        "timestamp=2024-01-15 08:35:00 subsys=mail proto=SMTP srcip=172.16.0.50 dstip=10.0.0.25 srcport=40222 dstport=25 rule=spam action=block id=10021 serverity=warn sys=securemail sub=smtp type=2 from=alerts@corp.local to=admin@corp.local subject='Security warning' srcuser=alerts srcdomain=corp.local dstuser=admin dstdomain=corp.local size=88421 extra='spf=fail'",
+        "timestamp=2024-01-15 08:36:00 subsys=vpn proto=TCP srcip=10.10.10.10 dstip=192.168.1.1 srcport=55001 dstport=443 rule=virtualfirewall action=block hub='HQ-HUB' srcuser='john' connection='CID-222' dstuser='remoteA' count=7",
+        "timestamp=2024-01-15 08:37:00 subsys=vpn proto=TCP srcip=203.0.113.100 dstip=10.0.0.1 srcport=55002 dstport=443 rule=accesslist action=block hub='BRANCH-HUB' srcuser='jane' connection='CID-333' count=5",
+        "timestamp=2024-01-15 08:38:00 subsys=ddos proto=UDP srcip=198.51.100.50 dstip=10.0.0.100 srcport=41000 dstport=4444 rule=neterror action=block attacktype=DDoS ip=198.51.100.50 direction=in status=end count=3500",
+        "timestamp=2024-01-15 08:39:00 subsys=ddos proto=UDP srcip=198.51.100.51 dstip=10.0.0.101 srcport=41001 dstport=443 rule=neterror action=block attacktype=DoS ip=198.51.100.51 pps=12087 mbps=62 status=end count=4400",
     ]
     
     return {

@@ -33,6 +33,17 @@ interface ClusterVisualizationProps {
   data: AnalysisResponse
 }
 
+const ALLOWED_SUBSYSTEMS = new Set([
+  "ddos",
+  "firewall",
+  "ips",
+  "appcontrol",
+  "waf",
+  "websec",
+  "mail",
+  "vpn",
+])
+
 export function ClusterVisualization({ data }: ClusterVisualizationProps) {
   const scatterTotal = data.latent_visualization?.points?.length ?? 0
 
@@ -80,6 +91,7 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
       })
     })
     return Object.entries(counts)
+      .filter(([name]) => ALLOWED_SUBSYSTEMS.has(name))
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value)
       .slice(0, 10)
@@ -251,7 +263,7 @@ export function ClusterVisualization({ data }: ClusterVisualizationProps) {
       <Card>
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Events by Subsystem</CardTitle>
-          <CardDescription>Top security subsystems by event count</CardDescription>
+          <CardDescription>Event volume for the 8 supported subsystems</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="h-[200px]">

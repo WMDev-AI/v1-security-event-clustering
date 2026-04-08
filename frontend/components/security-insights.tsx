@@ -618,6 +618,9 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                         <ScrollArea className="h-48">
                           <div className="space-y-2">
                             {selectedInsight.sample_events.map((event, idx) => (
+                              (() => {
+                                const row = event as Record<string, unknown>;
+                                return (
                               <div key={idx} className="p-2 rounded bg-muted text-xs font-mono">
                                 <div className="text-muted-foreground">
                                   {event.timestamp}
@@ -626,12 +629,34 @@ export function SecurityInsights({ data, loading, jobId }: SecurityInsightsProps
                                   {event.source_ip} -&gt; {event.dest_ip}:
                                   {event.dest_port}
                                 </div>
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {event.subsystem && (
+                                    <Badge variant="outline" className="text-[10px]">{String(event.subsystem)}</Badge>
+                                  )}
+                                  {row["rule"] && (
+                                    <Badge variant="outline" className="text-[10px]">rule:{String(row["rule"])}</Badge>
+                                  )}
+                                  {row["ddos_attack_type"] && (
+                                    <Badge variant="outline" className="text-[10px]">attacktype:{String(row["ddos_attack_type"])}</Badge>
+                                  )}
+                                  {row["ips_groupid"] && (
+                                    <Badge variant="outline" className="text-[10px]">groupid:{String(row["ips_groupid"])}</Badge>
+                                  )}
+                                  {row["waf_vhost"] && (
+                                    <Badge variant="outline" className="text-[10px]">vhost:{String(row["waf_vhost"])}</Badge>
+                                  )}
+                                  {row["mail_severity"] && (
+                                    <Badge variant="outline" className="text-[10px]">serverity:{String(row["mail_severity"])}</Badge>
+                                  )}
+                                </div>
                                 {event.content && (
                                   <div className="text-muted-foreground mt-1 truncate">
                                     {event.content}
                                   </div>
                                 )}
                               </div>
+                                );
+                              })()
                             ))}
                           </div>
                         </ScrollArea>

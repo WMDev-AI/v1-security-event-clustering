@@ -845,8 +845,6 @@ class SecurityInsightsEngine:
         
         # Internal source to external destination pattern
         internal_to_external = stats["internal_sources"] > stats["external_sources"]
-        webfilter_events = stats["subsystems"].get("webfilter", 0)
-        
         if keyword_count >= 1 or (internal_to_external and stats["blocked_count"] > 0):
             # Check if mostly internal sources
             if internal_to_external:

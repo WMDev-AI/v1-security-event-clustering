@@ -25,6 +25,7 @@ class SecurityEvent:
     severity: str = ""
     content: str = ""
     protocol: str = ""
+    rule: str = ""
     raw_data: dict = field(default_factory=dict)
     
     # Subsystem-specific fields
@@ -83,6 +84,59 @@ class SecurityEvent:
     firewall_zone_from: str = ""
     firewall_zone_to: str = ""
 
+    # New schema-aligned subsystem fields
+    ddos_attack_type: str = ""
+    ddos_ip: str = ""
+    ddos_direction: str = ""
+    ddos_status: str = ""
+    ddos_count: int = 0
+    ddos_pps: int = 0
+    ddos_mbps: int = 0
+
+    fw_count: int = 0
+    fw_len: int = 0
+    fw_ttl: int = 0
+    fw_tos: int = 0
+    fw_initf: str = ""
+    fw_outitf: str = ""
+
+    ips_groupid: str = ""
+    ips_reason: str = ""
+    ips_alertcount: int = 0
+    ips_dropcount: int = 0
+
+    app_count: int = 0
+    app_len: int = 0
+    app_ttl: int = 0
+    app_tos: int = 0
+    app_initf: str = ""
+    app_outitf: str = ""
+    app_mark: str = ""
+
+    waf_client: str = ""
+    waf_server: str = ""
+    waf_vhost: str = ""
+    waf_count: int = 0
+
+    mail_id: int = 0
+    mail_severity: str = ""
+    mail_sys: str = ""
+    mail_sub: str = ""
+    mail_type: int = 0
+    mail_from: str = ""
+    mail_to: str = ""
+    mail_srcuser: str = ""
+    mail_srcdomain: str = ""
+    mail_dstuser: str = ""
+    mail_dstdomain: str = ""
+    mail_size: int = 0
+    mail_extra: str = ""
+
+    vpn_srcuser: str = ""
+    vpn_connection: str = ""
+    vpn_dstuser: str = ""
+    vpn_count: int = 0
+
 
 class EventParser:
     """Parser for semi-structured security events in key=value format"""
@@ -114,6 +168,7 @@ class EventParser:
         'time': 'timestamp',
         'datetime': 'timestamp',
         'proto': 'protocol',
+        'rule': 'rule',
         'act': 'action',
         'event_action': 'action',
         'sev': 'severity',
@@ -122,18 +177,11 @@ class EventParser:
         'username': 'user',
         'usr': 'user',
         'account': 'user',
+        'serverity': 'mail_severity',
     }
     
     # Subsystem-specific field mappings
     SUBSYSTEM_FIELD_MAPPINGS = {
-        'waf': {
-            'url': ['uri', 'path', 'request_uri'],
-            'response_code': ['http_code', 'status_code', 'response_status'],
-            'reason': ['block_reason', 'violation_reason', 'rule_match'],
-            'request_method': ['method', 'http_method'],
-            'user_agent': ['agent', 'browser'],
-            'attack_type': ['attack', 'violation_type', 'threat_type'],
-        },
         'webfilter': {
             'url': ['uri', 'domain', 'destination_url'],
             'response_code': ['http_code', 'status_code'],
@@ -142,76 +190,76 @@ class EventParser:
             'referer': ['referrer', 'ref'],
         },
         'ips': {
-            'rule_id': ['rule', 'rule_number', 'sig_id'],
-            'rule_name': ['rule_name', 'signature', 'threat_name'],
-            'attack_type': ['attack_type', 'classification', 'threat_type'],
-            'severity': ['threat_level', 'alert_severity'],
+            'ips_groupid': ['groupid'],
+            'ips_reason': ['reason'],
+            'ips_alertcount': ['alertcount'],
+            'ips_dropcount': ['dropcount'],
         },
         'vpn': {
-            'vpn_user': ['user', 'login_user', 'authenticated_user'],
-            'vpn_hub': ['hub', 'gateway', 'vpn_gateway'],
-            'vpn_protocol': ['protocol', 'vpn_protocol', 'tunnel_type'],
-            'vpn_bytes_in': ['bytes_in', 'data_in', 'ingress_bytes'],
-            'vpn_bytes_out': ['bytes_out', 'data_out', 'egress_bytes'],
-            'vpn_session_id': ['session_id', 'tunnel_id', 'connection_id'],
+            'vpn_hub': ['hub'],
+            'vpn_srcuser': ['srcuser'],
+            'vpn_connection': ['connection'],
+            'vpn_dstuser': ['dstuser'],
+            'vpn_count': ['count'],
         },
         'mail': {
-            'sender': ['from', 'sender', 'mail_from'],
-            'recipient': ['to', 'recipient', 'mail_to'],
-            'subject': ['subject', 'mail_subject'],
-            'attachment_count': ['attachments', 'file_count'],
-            'dlp_category': ['category', 'content_category', 'mail_category'],
-        },
-        'dlp': {
-            'sender': ['source_user', 'user', 'from_user'],
-            'recipient': ['dest_user', 'to_user'],
-            'file_hash': ['hash', 'file_hash', 'md5'],
-            'dlp_category': ['category', 'data_type', 'policy_name'],
-            'attachment_count': ['file_count', 'attachment_count'],
-        },
-        'proxy': {
-            'url': ['destination_url', 'uri', 'host'],
-            'request_method': ['method', 'http_method'],
-            'user_agent': ['agent', 'browser', 'user_agent'],
-            'referer': ['referrer', 'ref'],
-            'content_type': ['mime_type', 'content_type'],
-        },
-        'dns': {
-            'dns_query': ['query', 'domain', 'query_name'],
-            'dns_response': ['response', 'answer', 'resolved_ip'],
-            'query_type': ['type', 'record_type', 'query_type'],
-        },
-        'sandbox': {
-            'malware_name': ['malware', 'threat_name', 'detected_malware'],
-            'malware_family': ['family', 'malware_family', 'variant'],
-            'detection_method': ['method', 'detection_method', 'analyzer'],
-            'sandbox_verdict': ['verdict', 'result', 'analysis_result'],
-            'file_hash': ['hash', 'md5', 'sha256'],
-        },
-        'antivirus': {
-            'malware_name': ['virus', 'threat_name', 'malware_name'],
-            'malware_family': ['family', 'variant'],
-            'detection_method': ['engine', 'scanner', 'detection_type'],
-            'file_hash': ['hash', 'file_hash'],
+            'mail_id': ['id'],
+            'mail_severity': ['serverity', 'severity'],
+            'mail_sys': ['sys'],
+            'mail_sub': ['sub'],
+            'mail_type': ['type'],
+            'mail_from': ['from'],
+            'mail_to': ['to'],
+            'subject': ['subject'],
+            'mail_srcuser': ['srcuser'],
+            'mail_srcdomain': ['srcdomain'],
+            'mail_dstuser': ['dstuser'],
+            'mail_dstdomain': ['dstdomain'],
+            'mail_size': ['size'],
+            'mail_extra': ['extra'],
         },
         'ddos': {
-            'attack_vector': ['vector', 'attack_type', 'method'],
-            'packets_dropped': ['dropped_packets', 'blocked_packets'],
-            'bandwidth_consumed': ['bandwidth', 'traffic_volume', 'bps'],
-            'attack_type': ['attack_type', 'ddos_type'],
+            'ddos_attack_type': ['attacktype'],
+            'ddos_ip': ['ip'],
+            'ddos_direction': ['direction'],
+            'ddos_status': ['status'],
+            'ddos_count': ['count'],
+            'ddos_pps': ['pps'],
+            'ddos_mbps': ['mbps'],
         },
         'firewall': {
-            'firewall_policy': ['policy', 'policy_name', 'rule_set'],
-            'firewall_zone_from': ['src_zone', 'from_zone', 'ingress_zone'],
-            'firewall_zone_to': ['dst_zone', 'to_zone', 'egress_zone'],
+            'fw_count': ['count'],
+            'fw_len': ['len'],
+            'fw_ttl': ['ttl'],
+            'fw_tos': ['tos'],
+            'fw_initf': ['initf'],
+            'fw_outitf': ['outitf'],
+        },
+        'appcontrol': {
+            'app_count': ['count'],
+            'app_len': ['len'],
+            'app_ttl': ['ttl'],
+            'app_tos': ['tos'],
+            'app_initf': ['initf'],
+            'app_outitf': ['outitf'],
+            'app_mark': ['mark'],
+        },
+        'websec': {
+            'content': ['content'],
+        },
+        'waf': {
+            'reason': ['reason'],
+            'waf_client': ['client'],
+            'waf_server': ['server'],
+            'waf_vhost': ['vhost'],
+            'waf_count': ['count'],
         },
     }
     
     # Known subsystems for one-hot encoding
     KNOWN_SUBSYSTEMS = [
-        'firewall', 'ips', 'ddos', 'waf', 'webfilter', 
-        'mail', 'vpn', 'proxy', 'dns', 'antivirus',
-        'sandbox', 'dlp', 'nat', 'router', 'auth'
+        'ddos', 'firewall', 'ips', 'appcontrol', 'waf', 'websec', 'mail', 'vpn',
+        'webfilter', 'proxy', 'dns', 'antivirus', 'sandbox', 'dlp', 'nat', 'router', 'auth'
     ]
     
     # Known actions for encoding
@@ -245,9 +293,9 @@ class EventParser:
     ]
     
     def __init__(self):
-        # Regex for parsing key=value pairs (handles quoted values)
+        # Regex for parsing key=value pairs, including "key"="value" style.
         self.kv_pattern = re.compile(
-            r"(\w+)=(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
+            r"(?:\"([^\"]+)\"|(\w+))=(?:\"([^\"]*)\"|'([^']*)'|(\S+))"
         )
         # IP address pattern
         self.ip_pattern = re.compile(
@@ -269,8 +317,8 @@ class EventParser:
         # First pass: get subsystem to know which specific fields to extract
         temp_subsystem = None
         for match in matches:
-            key = match[0].lower()
-            value = match[1] or match[2] or match[3]
+            key = (match[0] or match[1]).lower()
+            value = match[2] or match[3] or match[4]
             normalized_key = self.FIELD_MAPPINGS.get(key, key)
             if normalized_key == 'subsystem':
                 temp_subsystem = value.lower()
@@ -278,8 +326,8 @@ class EventParser:
         
         # Second pass: parse all fields and apply subsystem-specific mappings
         for match in matches:
-            key = match[0].lower()
-            value = match[1] or match[2] or match[3]
+            key = (match[0] or match[1]).lower()
+            value = match[2] or match[3] or match[4]
             
             # Normalize field name
             normalized_key = self.FIELD_MAPPINGS.get(key, key)
@@ -314,6 +362,10 @@ class EventParser:
                 event.content = value
             elif normalized_key == 'protocol':
                 event.protocol = value.upper()
+            elif normalized_key == 'rule':
+                event.rule = value
+            elif normalized_key == 'mail_severity':
+                event.mail_severity = value.lower()
             
             # Apply subsystem-specific field mappings
             if event.subsystem and event.subsystem in self.SUBSYSTEM_FIELD_MAPPINGS:
@@ -410,6 +462,96 @@ class EventParser:
                 event.firewall_zone_from = value
             elif field_name == 'firewall_zone_to':
                 event.firewall_zone_to = value
+            elif field_name == 'ddos_attack_type':
+                event.ddos_attack_type = value
+            elif field_name == 'ddos_ip':
+                event.ddos_ip = value
+            elif field_name == 'ddos_direction':
+                event.ddos_direction = value.lower()
+            elif field_name == 'ddos_status':
+                event.ddos_status = value.lower()
+            elif field_name == 'ddos_count':
+                event.ddos_count = int(value) if value.isdigit() else 0
+            elif field_name == 'ddos_pps':
+                event.ddos_pps = int(value) if value.isdigit() else 0
+            elif field_name == 'ddos_mbps':
+                event.ddos_mbps = int(value) if value.isdigit() else 0
+            elif field_name == 'fw_count':
+                event.fw_count = int(value) if value.isdigit() else 0
+            elif field_name == 'fw_len':
+                event.fw_len = int(value) if value.isdigit() else 0
+            elif field_name == 'fw_ttl':
+                event.fw_ttl = int(value) if value.isdigit() else 0
+            elif field_name == 'fw_tos':
+                event.fw_tos = int(value) if value.isdigit() else 0
+            elif field_name == 'fw_initf':
+                event.fw_initf = value
+            elif field_name == 'fw_outitf':
+                event.fw_outitf = value
+            elif field_name == 'ips_groupid':
+                event.ips_groupid = value
+            elif field_name == 'ips_reason':
+                event.ips_reason = value
+            elif field_name == 'ips_alertcount':
+                event.ips_alertcount = int(value) if value.isdigit() else 0
+            elif field_name == 'ips_dropcount':
+                event.ips_dropcount = int(value) if value.isdigit() else 0
+            elif field_name == 'app_count':
+                event.app_count = int(value) if value.isdigit() else 0
+            elif field_name == 'app_len':
+                event.app_len = int(value) if value.isdigit() else 0
+            elif field_name == 'app_ttl':
+                event.app_ttl = int(value) if value.isdigit() else 0
+            elif field_name == 'app_tos':
+                event.app_tos = int(value) if value.isdigit() else 0
+            elif field_name == 'app_initf':
+                event.app_initf = value
+            elif field_name == 'app_outitf':
+                event.app_outitf = value
+            elif field_name == 'app_mark':
+                event.app_mark = value
+            elif field_name == 'waf_client':
+                event.waf_client = value
+            elif field_name == 'waf_server':
+                event.waf_server = value
+            elif field_name == 'waf_vhost':
+                event.waf_vhost = value
+            elif field_name == 'waf_count':
+                event.waf_count = int(value) if value.isdigit() else 0
+            elif field_name == 'mail_id':
+                event.mail_id = int(value) if value.isdigit() else 0
+            elif field_name == 'mail_severity':
+                event.mail_severity = value.lower()
+            elif field_name == 'mail_sys':
+                event.mail_sys = value
+            elif field_name == 'mail_sub':
+                event.mail_sub = value
+            elif field_name == 'mail_type':
+                event.mail_type = int(value) if value.isdigit() else 0
+            elif field_name == 'mail_from':
+                event.mail_from = value
+            elif field_name == 'mail_to':
+                event.mail_to = value
+            elif field_name == 'mail_srcuser':
+                event.mail_srcuser = value
+            elif field_name == 'mail_srcdomain':
+                event.mail_srcdomain = value
+            elif field_name == 'mail_dstuser':
+                event.mail_dstuser = value
+            elif field_name == 'mail_dstdomain':
+                event.mail_dstdomain = value
+            elif field_name == 'mail_size':
+                event.mail_size = int(value) if value.isdigit() else 0
+            elif field_name == 'mail_extra':
+                event.mail_extra = value
+            elif field_name == 'vpn_srcuser':
+                event.vpn_srcuser = value
+            elif field_name == 'vpn_connection':
+                event.vpn_connection = value
+            elif field_name == 'vpn_dstuser':
+                event.vpn_dstuser = value
+            elif field_name == 'vpn_count':
+                event.vpn_count = int(value) if value.isdigit() else 0
         except Exception:
             pass  # Silently skip conversion errors
     
@@ -601,7 +743,7 @@ class EventParser:
         """Extract subsystem-specific numerical features"""
         features = []
         
-        if event.subsystem == 'waf' or event.subsystem == 'webfilter':
+        if event.subsystem == 'webfilter':
             # URL length (normalized)
             url_len = min(len(event.url) / 200.0, 1.0) if event.url else 0.0
             features.append(url_len)
@@ -615,7 +757,7 @@ class EventParser:
             method_val = method_map.get(event.request_method.upper(), 4) / 4.0 if event.request_method else 0.0
             features.append(method_val)
             
-        elif event.subsystem == 'ips':
+        elif event.subsystem == 'ips_legacy':
             # Rule ID hash (converted to feature)
             rule_hash = self._stable_hash_to_unit(event.rule_id, modulo=1024)
             features.append(rule_hash)
@@ -625,7 +767,7 @@ class EventParser:
             attack_len = min(len(event.attack_type) / 50.0, 1.0) if event.attack_type else 0.0
             features.append(attack_len)
             
-        elif event.subsystem == 'vpn':
+        elif event.subsystem == 'vpn_legacy':
             # VPN bytes in (normalized, log scale)
             vpn_bytes_in = min(np.log1p(event.vpn_bytes_in) / 20.0, 1.0) if event.vpn_bytes_in > 0 else 0.0
             features.append(vpn_bytes_in)
@@ -641,7 +783,7 @@ class EventParser:
             proto_val = proto_map.get(event.vpn_protocol.upper(), 3) / 3.0 if event.vpn_protocol else 0.0
             features.append(proto_val)
             
-        elif event.subsystem == 'mail' or event.subsystem == 'dlp':
+        elif event.subsystem == 'dlp':
             # Has sender
             features.append(1.0 if event.sender else 0.0)
             # Has recipient
@@ -695,28 +837,69 @@ class EventParser:
             features.append(1.0 if event.file_hash else 0.0)
             
         elif event.subsystem == 'ddos':
-            # Attack vector type: Volumetric=0, Protocol=1, Application=2, OTHER=3
-            av_lower = event.attack_vector.lower() if event.attack_vector else ""
-            av_type = (0 if 'volumetric' in av_lower else (1 if 'protocol' in av_lower else (2 if 'application' in av_lower else 3)))
-            features.append(av_type / 3.0)
-            # Packets dropped (normalized log scale)
-            packets_norm = min(np.log1p(event.packets_dropped) / 20.0, 1.0) if event.packets_dropped > 0 else 0.0
-            features.append(packets_norm)
-            # Bandwidth consumed (normalized log scale)
-            bw_norm = min(np.log1p(event.bandwidth_consumed) / 15.0, 1.0) if event.bandwidth_consumed > 0 else 0.0
-            features.append(bw_norm)
+            at = event.ddos_attack_type.upper()
+            at_val = 0.0 if at == "DOS" else (1.0 if at == "DDOS" else 0.5)
+            features.append(at_val)
+            features.append(1.0 if event.ddos_direction == 'in' else (0.0 if event.ddos_direction == 'out' else 0.5))
+            features.append(1.0 if event.ddos_status == 'end' else 0.0)
+            features.append(min(np.log1p(event.ddos_count) / 12.0, 1.0) if event.ddos_count > 0 else 0.0)
+            features.append(min(np.log1p(event.ddos_pps) / 12.0, 1.0) if event.ddos_pps > 0 else 0.0)
+            features.append(min(np.log1p(event.ddos_mbps) / 12.0, 1.0) if event.ddos_mbps > 0 else 0.0)
             
         elif event.subsystem == 'firewall':
-            # Firewall policy length
-            policy_len = min(len(event.firewall_policy) / 100.0, 1.0) if event.firewall_policy else 0.0
-            features.append(policy_len)
-            # Has zone info
-            features.append(1.0 if event.firewall_zone_from else 0.0)
-            features.append(1.0 if event.firewall_zone_to else 0.0)
-            # Zone pair encoding (simple hash)
-            zone_pair = f"{event.firewall_zone_from}-{event.firewall_zone_to}"
-            zone_hash = self._stable_hash_to_unit(zone_pair, modulo=1024) if zone_pair != "-" else 0.0
-            features.append(zone_hash)
+            features.append(min(np.log1p(event.fw_count) / 10.0, 1.0) if event.fw_count > 0 else 0.0)
+            features.append(min(event.fw_len / 9000.0, 1.0) if event.fw_len > 0 else 0.0)
+            features.append(min(event.fw_ttl / 255.0, 1.0) if event.fw_ttl > 0 else 0.0)
+            features.append(min(event.fw_tos / 255.0, 1.0) if event.fw_tos > 0 else 0.0)
+            features.append(1.0 if event.fw_initf else 0.0)
+            features.append(1.0 if event.fw_outitf else 0.0)
+            features.append(self._stable_hash_to_unit(f"{event.fw_initf}->{event.fw_outitf}", modulo=1024))
+
+        elif event.subsystem == 'ips':
+            features.append(self._stable_hash_to_unit(event.ips_groupid, modulo=2048))
+            features.append(1.0 if event.ips_reason else 0.0)
+            features.append(min(np.log1p(event.ips_alertcount) / 10.0, 1.0) if event.ips_alertcount > 0 else 0.0)
+            features.append(min(np.log1p(event.ips_dropcount) / 10.0, 1.0) if event.ips_dropcount > 0 else 0.0)
+
+        elif event.subsystem == 'appcontrol':
+            features.append(min(np.log1p(event.app_count) / 10.0, 1.0) if event.app_count > 0 else 0.0)
+            features.append(min(event.app_len / 9000.0, 1.0) if event.app_len > 0 else 0.0)
+            features.append(min(event.app_ttl / 255.0, 1.0) if event.app_ttl > 0 else 0.0)
+            features.append(min(event.app_tos / 255.0, 1.0) if event.app_tos > 0 else 0.0)
+            features.append(1.0 if event.app_initf else 0.0)
+            features.append(1.0 if event.app_outitf else 0.0)
+            features.append(self._stable_hash_to_unit(event.app_mark, modulo=1024))
+
+        elif event.subsystem == 'waf':
+            features.append(1.0 if event.reason else 0.0)
+            features.append(1.0 if event.waf_client else 0.0)
+            features.append(1.0 if event.waf_server else 0.0)
+            features.append(1.0 if event.waf_vhost else 0.0)
+            features.append(min(np.log1p(event.waf_count) / 10.0, 1.0) if event.waf_count > 0 else 0.0)
+
+        elif event.subsystem == 'websec':
+            features.extend(self.content_to_features(event.content)[:4])
+
+        elif event.subsystem == 'mail':
+            features.append(min(np.log1p(event.mail_id) / 10.0, 1.0) if event.mail_id > 0 else 0.0)
+            features.append(1.0 if event.mail_severity in ('critical', 'high', 'warn', 'warning') else (0.5 if event.mail_severity else 0.0))
+            features.append(1.0 if event.mail_sys else 0.0)
+            features.append(1.0 if event.mail_sub else 0.0)
+            features.append(min(np.log1p(event.mail_type) / 8.0, 1.0) if event.mail_type > 0 else 0.0)
+            features.append(1.0 if event.mail_from else 0.0)
+            features.append(1.0 if event.mail_to else 0.0)
+            features.append(min(np.log1p(event.mail_size) / 15.0, 1.0) if event.mail_size > 0 else 0.0)
+
+        elif event.subsystem == 'vpn':
+            is_virtualfirewall = 1.0 if event.rule.lower() == 'virtualfirewall' else 0.0
+            is_accesslist = 1.0 if event.rule.lower() == 'accesslist' else 0.0
+            features.append(is_virtualfirewall)
+            features.append(is_accesslist)
+            features.append(1.0 if event.vpn_hub else 0.0)
+            features.append(1.0 if event.vpn_srcuser else 0.0)
+            features.append(1.0 if event.vpn_connection else 0.0)
+            features.append(1.0 if event.vpn_dstuser else 0.0)
+            features.append(min(np.log1p(event.vpn_count) / 10.0, 1.0) if event.vpn_count > 0 else 0.0)
         
         # Pad all subsystem features to exactly 12 dimensions for consistency
         # This ensures all feature vectors are the same length (50 base + 12 subsystem = 62 total)
