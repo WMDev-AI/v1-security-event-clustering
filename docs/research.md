@@ -462,7 +462,7 @@ These controls are essential because representation quality strongly bounds achi
 
 The deep encoder $f_\theta$ can only exploit structure that is present (or recoverable) in the input vectors $x_i$. Improvements to the hand-crafted encoder $\phi$ therefore raise the **ceiling** for both training stability and intrinsic metrics (e.g., Silhouette), especially when logs carry free-text `content` and high-cardinality categorical fields. The following enhancements are implemented in the event featurizer and are orthogonal to the choice of model family: they sharpen the input geometry before latent learning and refinement.
 
-**Deterministic categorical projection.** High-cardinality or opaque string identifiers (e.g., IPS `rule_id`, firewall zone pairs) are mapped to a fixed interval using a **stable** hash: UTF-8 MD5 digest, reduction modulo $M$, then normalization to $[0,1]$:
+**Deterministic categorical projection.** High-cardinality or opaque string identifiers (e.g., IPS `groupid`, interface pairs, VPN connection IDs) are mapped to a fixed interval using a **stable** hash: UTF-8 MD5 digest, reduction modulo $M$, then normalization to $[0,1]$:
 
 $h_M(s) = \frac{(\text{int}(\text{MD5}(s)) \bmod M)}{M - 1}$
 
@@ -1350,7 +1350,7 @@ This section gives **illustrative** experimental summaries that match the evalua
 
 ### 13.1 Setup (aligned with the codebase)
 
-- **Input**: $N \approx 10^4$–$10^5$ parsed key=value events; per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
+- **Input**: $N \approx 10^4$–$10^5$ parsed `"key"="value"` events (legacy `key=value` accepted for compatibility); per-batch z-score normalization of the $d=70$-dimensional vectors (Section 5).
 - **Models**: DEC, IDEC, **IDEC+LSTM**, **IDEC+Transformer**, **IDEC+GNN**, VaDE, contrastive, UFCM, **UFCM+LSTM**, DMVC; default-ish depths and latent dimension $m_{\mathrm{latent}}=32$ unless noted. For sequence IDEC and **UFCM+LSTM**, record **`seq_len`** (and LSTM/Transformer width-depth knobs where applicable). For GNN-IDEC, record **`gnn_k_neighbors`**, **`gnn_hidden_dim`**, **`gnn_num_layers`**, and **batch size** (it shapes the graph). (Do not confuse latent width with UFCM fuzziness $m_{\mathrm{fuzz}}>1$ in Section 6.5.) For DMVC, also record `gamma` and `mvc_weight` when comparing runs.
 - **Refinement**: latent ensemble search with time budget $T_{\max}\approx 8\,\mathrm{s}$, sampled Silhouette for scoring (Section 9).
 - **Metrics**: Silhouette ($S$, higher better), Davies–Bouldin ($\mathrm{DBI}$, lower better), Calinski–Harabasz ($\mathrm{CH}$, higher better), all computed in **latent space** on final assignments unless stated otherwise.

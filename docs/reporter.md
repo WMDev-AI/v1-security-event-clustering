@@ -11,7 +11,7 @@ This document describes the **Security Event Deep Clustering** codebase: system 
 | Layer | Location | Role |
 |--------|-----------|------|
 | API gateway | `backend/main.py` | FastAPI app mounted at `/api`; CORS; job orchestration; insight endpoints |
-| Featurization | `backend/event_parser.py` | Parse `key=value` logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
+| Featurization | `backend/event_parser.py` | Parse `"key"="value"` (and backward-compatible `key=value`) logs → `SecurityEvent` → fixed-length vectors ($d=70$) |
 | Temporal windows | `backend/sequence_featurization.py` | `build_temporal_sequences`, `expand_rows_to_sequences` — $[N,T,d]$ tensors for sequence IDEC and **UFCM+LSTM** (training vs predict) |
 | Models & losses | `backend/deep_clustering.py` | PyTorch DEC / IDEC / VaDE / contrastive / **DeepUFCM** / **DeepMultiViewClustering (DMVC)** modules and loss helpers |
 | Sequence / fuzzy-sequence | `backend/sequence_clustering.py` | `SecurityEventSequenceAutoEncoder` (LSTM/Transformer), `DeepEmbeddedClusteringSequence`, `ImprovedDECSequence`, **`DeepUFCMSequence`** (LSTM + same fuzzy objective as `DeepUFCM`) |
@@ -547,7 +547,7 @@ Effective neighborhood size per batch is $\min(\texttt{gnn\_k\_neighbors}, B-1)$
 ### 7.1 `SecurityEvent` (dataclass)
 
 - **Core**: `timestamp`, `source_ip`, `dest_ip`, `dest_port`, `source_port`, `subsystem`, `user`, `action`, `severity`, `content`, `protocol`, `raw_data`.
-- **Subsystem-specific**: WAF/webfilter (`url`, `response_code`, `reason`, …), IPS (`rule_id`, `rule_name`, `attack_type`), VPN, mail/DLP, proxy, DNS, AV/sandbox, DDoS, firewall zones/policy, etc. (see class body).
+- **Subsystem-specific (current schema)**: DDoS (`attacktype`, `ip`, `direction` or `pps/mbps`, `status`, `count`), Firewall (`count`, `len`, `ttl`, `tos`, `initf`, `outitf`), IPS (`groupid`, `reason`, `alertcount`, `dropcount`), AppControl (`count`, `len`, `ttl`, `tos`, `initf`, `outitf`, `mark`), WAF (`reason`, `client`, `server`, `vhost`, `count`), WebSec (`content`), Mail (`id`, `serverity`, `sys`, `sub`, `type`, sender/recipient/domain fields, `size`, `extra`), VPN (`hub`, `srcuser`, `connection`, optional `dstuser`, `count`).
 
 ### 7.2 `EventParser`
 
@@ -559,7 +559,7 @@ Effective neighborhood size per batch is $\min(\texttt{gnn\_k\_neighbors}, B-1)$
 
 | Method | Parameters | Purpose / flow |
 |--------|------------|----------------|
-| `parse_event` | `raw_event: str` | Regex key=value scan; subsystem detection; fills `SecurityEvent` |
+| `parse_event` | `raw_event: str` | Regex scan for `"key"="value"` (and legacy `key=value`); subsystem detection; fills `SecurityEvent` |
 | `parse_events` | `raw_events: list[str]` | List comprehension over `parse_event` |
 | `_set_subsystem_field` | `event`, `field_name`, `value`, `subsystem` | Typed assignment for extended fields |
 | `_is_float` | `value: str` | Parse guard |
